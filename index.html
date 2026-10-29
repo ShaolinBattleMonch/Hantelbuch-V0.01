@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Hantelbuch</title>
+<meta name="description" content="Trainingsplan und Fortschritte für Manu und Rob">
+<meta name="theme-color" content="#eef1f3" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#111518" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Hantelbuch">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@700;800&family=Figtree:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="topbar" class="topbar" hidden><i></i></div>
+<div id="app"></div>
+<div id="modal"></div>
+<div id="toast" class="toast" role="status" hidden></div>
+<div id="loader" class="loader" hidden>
+  <div class="ld-inner">
+    <div class="ld-brand">Hantelbuch</div>
+    <div class="ld-ring">
+      <svg viewBox="0 0 120 120" aria-hidden="true">
+        <circle class="ld-track" cx="60" cy="60" r="52"></circle>
+        <circle class="ld-bar" id="ld-bar" cx="60" cy="60" r="52"></circle>
+      </svg>
+      <div class="ld-pct" id="ld-pct">0 %</div>
+    </div>
+    <div class="ld-text" id="ld-text">Verbinde …</div>
+    <div class="ld-sub" id="ld-sub"></div>
+  </div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
