@@ -1,6 +1,6 @@
 /* Hantelbuch – Service Worker: macht die App offline nutzbar.
    Bei einem Update der App-Dateien VERSION hochzählen, dann laden alle Geräte die neue Version. */
-const VERSION = 'hantelbuch-v1';
+const VERSION = 'hantelbuch-v2';
 const FONTS = 'hantelbuch-fonts';
 const SHELL = [
   './', './index.html', './styles.css', './app.js', './manifest.webmanifest',
@@ -8,7 +8,8 @@ const SHELL = [
 ];
 
 self.addEventListener('install', event => {
-  event.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  // cache: 'reload' umgeht den Browser-Zwischenspeicher, damit wirklich die neuen Dateien geladen werden
+  event.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL.map(u => new Request(u, { cache: 'reload' })))).then(() => self.skipWaiting()));
 });
 
 self.addEventListener('activate', event => {
