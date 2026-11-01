@@ -4,7 +4,7 @@
    zuerst auf dem Handy, beim Sync in der Google-Tabelle. Der aktuelle Stand wird immer aus dem Log berechnet.
    Ausnahme: der Vault. Seine Bilder bleiben verschlüsselt nur auf diesem Handy und werden nie synchronisiert. */
 
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.3.0';
 const SCRIPT_MIN = 2;            // benötigte Version des Google-Skripts
 const PEOPLE = ['Manu', 'Rob'];
 const DAYS = ['A', 'B', 'C'];    // interne Kennung der Trainingstage, angezeigt werden die Kürzel
@@ -110,6 +110,7 @@ const ICON = {
   lock: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>',
   cam: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>',
   plus: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>',
+  key: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="7.5" cy="15.5" r="4.5"/><path d="m10.7 12.3 9.8-9.8M17 6l3 3M14.5 8.5l2.5 2.5"/></svg>',
   del: '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 5H9l-6 7 6 7h12z"/><path d="m16 9-5 6M11 9l5 6"/></svg>'
 };
 
@@ -446,8 +447,8 @@ const mini = {
   hide() { setTimeout(() => { $('#topbar').hidden = true; this.set(0); }, 300); }
 };
 let syncing = null, syncError = null;
-async function call(body) {
-  const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 25000);
+async function call(body, timeout = 25000) {
+  const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), timeout);
   try {
     const res = await fetch(cfg.url, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ ...body, key: cfg.key }), signal: ctrl.signal, redirect: 'follow' });
     let json; try { json = await res.json(); } catch (e) { throw { code: 'bad_response' }; }
@@ -507,6 +508,7 @@ function sync({ overlay = false, quiet = false } = {}) {
       ui.set(100, 'Fertig', '');
       if (overlay) await sleep(400);
       if (rejected && !quiet) toast('Einige Einträge wurden abgelehnt. Bitte das Google-Skript aktualisieren.');
+      setTimeout(() => vaultSync(), 0);
       return { ok: true };
     } catch (err) {
       const code = (err && err.code) || 'server';
@@ -537,11 +539,17 @@ async function resizeImage(file, max, square) {
 }
 const canvasBlob = (c, q) => new Promise(r => c.toBlob(r, 'image/jpeg', q));
 
-/* ---------- Vault: Bilder nur auf diesem Handy, verschlüsselt mit dem Code ---------- */
+/* ---------- Vault: private Bilder, verschlüsselt ----------
+   Schlüsselaufbau (ab 1.3):
+   - Wiederherstellungsschlüssel: 160 Bit Zufall, einmal angezeigt (32 Zeichen). Nur die Person selbst kennt ihn.
+   - Daraus abgeleitet: der Datenschlüssel (verschlüsselt Bilder und Notizen) und der Vault-Zugang für die Tabelle.
+   - Auf dem Handy liegt der Wiederherstellungsschlüssel nur mit dem 4-stelligen Code verschlüsselt.
+   - In die Tabelle gehen nur die schon verschlüsselten Einträge. Ohne den Schlüssel sind sie unlesbar. */
 const b64e = u8 => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
 const b64d = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
-const VAULT = { picking: 0, key: null, mode: 'unlock', pin: '', first: '', msg: '', bad: false, entries: null, urls: {}, fails: 0, until: 0, del: null, importData: null, photo: null, photoUrl: null };
+const VAULT = { picking: 0, key: null, raw: null, mode: 'unlock', pin: '', first: '', msg: '', bad: false, entries: null, urls: {}, fails: 0, until: 0, del: null, importData: null, photo: null, photoUrl: null, showKey: null, wantKey: false, restore: null };
 const vmeta = () => LS.get('vault.' + cfg.me, null);
+const vtoken = () => LS.get('vault.tok.' + cfg.me, null);
 const IDB = {
   db: null,
   open() {
@@ -553,8 +561,9 @@ const IDB = {
       r.onerror = () => rej(r.error);
     });
   },
-  async tx(mode, fn) { const db = await this.open(); return new Promise((res, rej) => { const t = db.transaction('entries', mode); const s = t.objectStore('entries'); const out = fn(s); t.oncomplete = () => res(out && out.result !== undefined ? out.result : out); t.onerror = () => rej(t.error); }); },
+  async tx(mode, fn) { const db = await this.open(); return new Promise((res, rej) => { const t = db.transaction('entries', mode); const s = t.objectStore('entries'); const out = fn(s); t.oncomplete = () => res(out instanceof IDBRequest ? out.result : out); t.onerror = () => rej(t.error); }); },
   all(person) { return this.tx('readonly', s => s.index('person').getAll(person)); },
+  get(id) { return this.tx('readonly', s => s.get(id)); },
   put(rec) { return this.tx('readwrite', s => s.put(rec)); },
   del(id) { return this.tx('readwrite', s => s.delete(id)); }
 };
@@ -566,14 +575,63 @@ async function encBytes(key, bytes) { const iv = crypto.getRandomValues(new Uint
 async function decBytes(key, iv, ct) { return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(iv) }, key, ct)); }
 const encJSON = (key, o) => encBytes(key, new TextEncoder().encode(JSON.stringify(o)));
 const decJSON = async (key, iv, ct) => JSON.parse(new TextDecoder().decode(await decBytes(key, iv, ct)));
-async function makeMeta(pin) {
-  const salt = b64e(crypto.getRandomValues(new Uint8Array(16)));
-  const key = await deriveKey(pin, salt);
-  const chk = await encJSON(key, { v: 'hantelbuch-vault' });
-  return { key, meta: { salt, civ: chk.iv, check: b64e(chk.ct) } };
+
+/* Wiederherstellungsschlüssel: 20 Byte, als 8 Vierergruppen ohne verwechselbare Zeichen (kein 0/O, 1/I) */
+const RK_ABC = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+function rkEncode(raw) {
+  let bits = '', out = '';
+  raw.forEach(b => { bits += b.toString(2).padStart(8, '0'); });
+  for (let i = 0; i < bits.length; i += 5) out += RK_ABC[parseInt(bits.slice(i, i + 5), 2)];
+  return out.match(/.{4}/g).join('-');
 }
-async function tryKey(pin, meta) {
-  try { const key = await deriveKey(pin, meta.salt); const o = await decJSON(key, meta.civ, b64d(meta.check)); return o && o.v === 'hantelbuch-vault' ? key : null; } catch (e) { return null; }
+function rkDecode(text) {
+  const t = String(text || '').toUpperCase().replace(/[^A-Z0-9]/g, '').replace(/O/g, '0').replace(/I/g, '1');
+  if (t.length !== 32 || [...t].some(c => !RK_ABC.includes(c))) return null;
+  const bits = [...t].map(c => RK_ABC.indexOf(c).toString(2).padStart(5, '0')).join('');
+  return Uint8Array.from(bits.match(/.{8}/g), b => parseInt(b, 2));
+}
+async function rawKeys(raw) {
+  const base = await crypto.subtle.importKey('raw', raw, 'HKDF', false, ['deriveKey', 'deriveBits']);
+  const salt = new TextEncoder().encode('hantelbuch-vault-v2');
+  const dk = await crypto.subtle.deriveKey({ name: 'HKDF', hash: 'SHA-256', salt, info: new TextEncoder().encode('daten') }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+  const tb = new Uint8Array(await crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt, info: new TextEncoder().encode('zugang') }, base, 256));
+  return { dk, token: [...tb].map(b => b.toString(16).padStart(2, '0')).join('') };
+}
+async function wrapMeta(pin, raw, saved) {
+  const salt = b64e(crypto.getRandomValues(new Uint8Array(16)));
+  const pk = await deriveKey(pin, salt);
+  const w = await encBytes(pk, raw);
+  return { v: 2, salt, wiv: w.iv, wrap: b64e(w.ct), saved: !!saved };
+}
+/* Öffnet den Vault mit dem Code. Liefert { dk, raw } oder null. Alte Vaults (1.2) haben noch keinen raw-Schlüssel. */
+async function openMeta(pin, meta) {
+  try {
+    const pk = await deriveKey(pin, meta.salt);
+    if (meta.v === 2) { const raw = await decBytes(pk, meta.wiv, b64d(meta.wrap)); const k = await rawKeys(raw); return { dk: k.dk, raw, token: k.token }; }
+    const o = await decJSON(pk, meta.civ, b64d(meta.check));
+    return o && o.v === 'hantelbuch-vault' ? { dk: pk, raw: null } : null;
+  } catch (e) { return null; }
+}
+async function unlocked(res) {
+  VAULT.key = res.dk; VAULT.raw = res.raw;
+  if (res.token) LS.set('vault.tok.' + cfg.me, res.token);
+}
+/* Umstellung eines alten Vaults (nur mit Code verschlüsselt) auf den Wiederherstellungsschlüssel */
+async function migrateVault(pin) {
+  const raw = crypto.getRandomValues(new Uint8Array(20));
+  const k = await rawKeys(raw);
+  await reencryptAll(VAULT.key, k.dk);
+  LS.set('vault.' + cfg.me, await wrapMeta(pin, raw, false));
+  await unlocked({ dk: k.dk, raw, token: k.token });
+  VAULT.showKey = rkEncode(raw);
+}
+async function reencryptAll(oldKey, newKey) {
+  for (const r of await IDB.all(cfg.me)) {
+    const m = await decBytes(oldKey, r.miv, new Uint8Array(r.meta));
+    const i = await decBytes(oldKey, r.iiv, new Uint8Array(r.img));
+    const em = await encBytes(newKey, m), ei = await encBytes(newKey, i);
+    await IDB.put({ ...r, miv: em.iv, meta: em.ct.buffer, iiv: ei.iv, img: ei.ct.buffer, up: false });
+  }
 }
 async function loadVault() {
   const recs = await IDB.all(cfg.me);
@@ -584,7 +642,7 @@ async function loadVault() {
 }
 function lockVault() {
   Object.values(VAULT.urls).forEach(u => URL.revokeObjectURL(u));
-  Object.assign(VAULT, { key: null, entries: null, urls: {}, pin: '', first: '', msg: '', mode: 'unlock', del: null, importData: null });
+  Object.assign(VAULT, { key: null, raw: null, entries: null, urls: {}, pin: '', first: '', msg: '', mode: 'unlock', del: null, importData: null, showKey: null, restore: null });
   if (VAULT.photoUrl) URL.revokeObjectURL(VAULT.photoUrl);
   VAULT.photo = null; VAULT.photoUrl = null;
 }
@@ -595,8 +653,8 @@ async function fillVaultImages() {
     const id = el.dataset.vimg;
     if (!VAULT.urls[id]) {
       try {
-        const recs = await IDB.tx('readonly', s => s.get(id));
-        const bytes = await decBytes(VAULT.key, recs.iiv, new Uint8Array(recs.img));
+        const rec = await IDB.get(id);
+        const bytes = await decBytes(VAULT.key, rec.iiv, new Uint8Array(rec.img));
         VAULT.urls[id] = URL.createObjectURL(new Blob([bytes], { type: 'image/jpeg' }));
       } catch (e) { continue; }
     }
@@ -610,49 +668,51 @@ async function pinComplete() {
   if (VAULT.mode === 'set1' || VAULT.mode === 'new1') { VAULT.first = pin; VAULT.mode = VAULT.mode === 'set1' ? 'set2' : 'new2'; VAULT.msg = ''; render(); return; }
   if (VAULT.mode === 'set2') {
     if (pin !== VAULT.first) { VAULT.mode = 'set1'; VAULT.first = ''; return fail('Die Codes stimmen nicht überein. Bitte noch einmal.'); }
-    VAULT.msg = 'Lege Vault an …'; render();
-    const { key, meta: m } = await makeMeta(pin);
-    LS.set('vault.' + cfg.me, m); VAULT.key = key; VAULT.entries = []; VAULT.mode = 'unlock'; VAULT.msg = '';
+    const restoring = !!VAULT.restore;
+    VAULT.msg = restoring ? 'Stelle Vault wieder her …' : 'Lege Vault an …'; render();
+    const raw = restoring ? VAULT.restore.raw : crypto.getRandomValues(new Uint8Array(20));
+    const k = await rawKeys(raw);
+    LS.set('vault.' + cfg.me, await wrapMeta(pin, raw, restoring));
+    await unlocked({ dk: k.dk, raw, token: k.token });
+    VAULT.entries = []; VAULT.mode = 'unlock'; VAULT.restore = null;
     try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) { /* optional */ }
-    toast('Vault angelegt'); render(); return;
+    if (restoring) {
+      VAULT.msg = 'Lade Bilder aus der Tabelle …'; render();
+      const r = await vaultSync({ progress: (a, b) => { VAULT.msg = `Lade Bilder aus der Tabelle … ${a} von ${b}`; if (view === 'vault' && !VAULT.entries.length) render(); } });
+      VAULT.msg = ''; await loadVault();
+      toast(r && r.ok ? `${VAULT.entries.length} ${VAULT.entries.length === 1 ? 'Bild' : 'Bilder'} wiederhergestellt` : 'Laden unterbrochen. Der Rest kommt beim nächsten Öffnen.');
+      render(); return;
+    }
+    VAULT.msg = ''; VAULT.showKey = rkEncode(raw);
+    render(); return;
   }
   if (VAULT.mode === 'new2') {
     if (pin !== VAULT.first) { VAULT.mode = 'new1'; VAULT.first = ''; return fail('Die Codes stimmen nicht überein. Neuen Code noch einmal eingeben.'); }
-    VAULT.msg = 'Verschlüssele neu …'; render();
-    await rekeyVault(VAULT.key, pin);
-    VAULT.mode = 'unlock'; VAULT.msg = ''; toast('Vault-Code geändert'); location.hash = '#einstellungen'; return;
+    VAULT.msg = 'Speichere neuen Code …'; render();
+    if (VAULT.raw) LS.set('vault.' + cfg.me, await wrapMeta(pin, VAULT.raw, meta && meta.saved));
+    lockVault(); toast('Vault-Code geändert'); location.hash = '#einstellungen'; return;
   }
   if (Date.now() < VAULT.until) return fail(`Zu viele Versuche. Bitte ${Math.ceil((VAULT.until - Date.now()) / 1000)} Sekunden warten.`);
   if (VAULT.mode === 'import') {
-    const key = await tryKey(pin, VAULT.importData.meta);
-    if (!key) return fail('Falscher Code für dieses Backup.');
+    const res = await openMeta(pin, VAULT.importData.meta);
+    if (!res) return fail('Falscher Code für dieses Backup.');
     VAULT.msg = 'Lade Backup …'; render();
-    const n = await importBackup(VAULT.importData, key);
-    VAULT.importData = null; VAULT.mode = 'unlock'; VAULT.msg = ''; await loadVault(); toast(`${n} ${n === 1 ? 'Bild' : 'Bilder'} aus dem Backup geladen`); render(); return;
+    const n = await importBackup(VAULT.importData, res.dk);
+    VAULT.importData = null; VAULT.mode = 'unlock'; VAULT.msg = ''; await loadVault(); toast(`${n} ${n === 1 ? 'Bild' : 'Bilder'} aus dem Backup geladen`); render(); vaultSync(); return;
   }
   VAULT.msg = 'Prüfe Code …'; render();
-  const key = await tryKey(pin, meta);
-  if (!key) { VAULT.fails++; if (VAULT.fails >= 5) { VAULT.until = Date.now() + 30000; VAULT.fails = 0; } return fail('Falscher Code.'); }
+  const res = await openMeta(pin, meta);
+  if (!res) { VAULT.fails++; if (VAULT.fails >= 5) { VAULT.until = Date.now() + 30000; VAULT.fails = 0; } return fail('Falscher Code.'); }
   VAULT.fails = 0; VAULT.msg = '';
-  if (VAULT.mode === 'old') { VAULT.key = key; VAULT.mode = 'new1'; render(); return; }
-  VAULT.key = key;
+  await unlocked(res);
+  if (!res.raw) { VAULT.msg = 'Stelle den Vault auf Cloud-Sicherung um …'; render(); await migrateVault(pin); VAULT.msg = ''; }
+  if (VAULT.mode === 'old') { VAULT.mode = 'new1'; render(); return; }
+  if (VAULT.wantKey) { VAULT.wantKey = false; VAULT.showKey = rkEncode(VAULT.raw); }
   if (VAULT.importData) {
-    if (VAULT.importData.meta.salt === meta.salt) { VAULT.msg = 'Lade Backup …'; render(); const n = await importBackup(VAULT.importData, key); VAULT.importData = null; VAULT.msg = ''; toast(`${n} ${n === 1 ? 'Bild' : 'Bilder'} aus dem Backup geladen`); }
+    if (VAULT.importData.meta.salt === vmeta().salt) { VAULT.msg = 'Lade Backup …'; render(); const n = await importBackup(VAULT.importData, VAULT.key); VAULT.importData = null; VAULT.msg = ''; toast(`${n} ${n === 1 ? 'Bild' : 'Bilder'} aus dem Backup geladen`); }
     else { VAULT.mode = 'import'; render(); return; }
   }
-  await loadVault(); render();
-}
-async function rekeyVault(oldKey, newPin) {
-  const { key, meta } = await makeMeta(newPin);
-  const recs = await IDB.all(cfg.me);
-  for (const r of recs) {
-    const m = await decBytes(oldKey, r.miv, new Uint8Array(r.meta));
-    const i = await decBytes(oldKey, r.iiv, new Uint8Array(r.img));
-    const em = await encBytes(key, m), ei = await encBytes(key, i);
-    await IDB.put({ ...r, miv: em.iv, meta: em.ct.buffer, iiv: ei.iv, img: ei.ct.buffer });
-  }
-  LS.set('vault.' + cfg.me, meta);
-  lockVault();
+  await loadVault(); render(); vaultSync();
 }
 async function saveVaultEntry(form) {
   const f = new FormData(form);
@@ -664,15 +724,22 @@ async function saveVaultEntry(form) {
   const btn = $('#vn-save'); btn.disabled = true; btn.textContent = 'Speichere …';
   try {
     const canvas = await resizeImage(VAULT.photo, 1600, false);
-    const blob = await canvasBlob(canvas, 0.85);
+    const blob = await canvasBlob(canvas, 0.82);
     const bytes = new Uint8Array(await blob.arrayBuffer());
     const em = await encJSON(VAULT.key, { date, note, bw: bw >= 30 && bw <= 300 ? bw : null });
     const ei = await encBytes(VAULT.key, bytes);
-    await IDB.put({ id: uid(), person: cfg.me, created: new Date().toISOString(), miv: em.iv, meta: em.ct.buffer, iiv: ei.iv, img: ei.ct.buffer });
+    await IDB.put({ id: uid(), person: cfg.me, created: new Date().toISOString(), miv: em.iv, meta: em.ct.buffer, iiv: ei.iv, img: ei.ct.buffer, up: false });
     if (VAULT.photoUrl) URL.revokeObjectURL(VAULT.photoUrl);
     VAULT.photo = null; VAULT.photoUrl = null;
     await loadVault(); toast('Im Vault gespeichert'); location.hash = '#vault';
+    vaultSync();
   } catch (e) { btn.disabled = false; btn.textContent = 'Im Vault speichern'; err('Speichern fehlgeschlagen: ' + (e.message || e)); }
+}
+async function deleteVaultEntry(id) {
+  const rec = await IDB.get(id);
+  await IDB.del(id);
+  if (rec && rec.up) { const t = LS.get('vault.tomb.' + cfg.me, []); t.push(id); LS.set('vault.tomb.' + cfg.me, t); }
+  vaultSync();
 }
 async function exportVault() {
   const meta = vmeta(); if (!meta) return;
@@ -695,7 +762,7 @@ async function importBackup(data, srcKey) {
     const m = await decBytes(srcKey, e.miv, b64d(e.meta));
     const i = await decBytes(srcKey, e.iiv, b64d(e.img));
     const em = await encBytes(VAULT.key, m), ei = await encBytes(VAULT.key, i);
-    await IDB.put({ id: e.id, person: cfg.me, created: e.created, miv: em.iv, meta: em.ct.buffer, iiv: ei.iv, img: ei.ct.buffer });
+    await IDB.put({ id: e.id, person: cfg.me, created: e.created, miv: em.iv, meta: em.ct.buffer, iiv: ei.iv, img: ei.ct.buffer, up: false });
     n++;
   }
   return n;
@@ -709,6 +776,85 @@ async function readBackupFile(file) {
     if (!VAULT.key) { toast('Gib den Code ein, mit dem das Backup erstellt wurde.'); VAULT.mode = 'unlock'; location.hash = '#vault'; render(); return; }
     VAULT.mode = 'import'; location.hash = '#vault'; render();
   } catch (e) { toast('Diese Datei ist kein Hantelbuch-Backup.'); }
+}
+
+/* ---------- Vault-Sicherung in der Tabelle ----------
+   Läuft still im Hintergrund, auch wenn der Vault gesperrt ist: Hoch- und runtergeladen werden nur die bereits
+   verschlüsselten Einträge. Der persönliche Vault-Zugang sorgt dafür, dass niemand sonst sie abrufen kann. */
+const VCHUNK = 45000;
+let vaultSyncing = null, vaultQueued = null;
+const vcloud = () => LS.get('vault.cloud.' + cfg.me, null);
+function vaultSync({ progress } = {}) {
+  // läuft schon ein Abgleich, kommt genau ein weiterer danach (z. B. für ein gerade gelöschtes Bild)
+  if (vaultSyncing) { if (!vaultQueued) vaultQueued = vaultSyncing.then(() => { vaultQueued = null; return vaultSync({ progress }); }); return vaultQueued; }
+  const tok = vtoken(), meta = vmeta();
+  if (!cfg.url || !cfg.key || !tok || !meta || meta.v !== 2 || navigator.onLine === false) return Promise.resolve({ ok: false });
+  if (scriptVersion != null && scriptVersion < 3) return Promise.resolve({ ok: false, code: 'script' });
+  const me = cfg.me;
+  const req = (action, extra = {}, timeout = 120000) => call({ action, person: me, vtoken: tok, ...extra }, timeout);
+  vaultSyncing = (async () => {
+    let changed = false;
+    try {
+      let cloud = [], fresh = false;
+      try { cloud = (await req('vault_list', {}, 30000)).entries || []; }
+      catch (e) { if (e.code !== 'vault_none') throw e; fresh = true; }
+      const inCloud = new Set(cloud.map(c => c.id));
+      // gelöschte Bilder auch in der Tabelle entfernen
+      const tombs = LS.get('vault.tomb.' + me, []);
+      for (const id of [...tombs]) {
+        if (inCloud.has(id)) { await req('vault_del', { id }, 30000); inCloud.delete(id); }
+        tombs.splice(tombs.indexOf(id), 1); LS.set('vault.tomb.' + me, tombs);
+      }
+      const local = await IDB.all(me), have = new Set(local.map(r => r.id));
+      // hochladen, was neu ist; was hochgeladen war und in der Tabelle fehlt, wurde auf einem anderen Gerät gelöscht
+      for (const r of local) {
+        if (r.up && !inCloud.has(r.id) && !fresh) { await IDB.del(r.id); changed = true; continue; }
+        if (r.up && !fresh) continue;
+        const body = JSON.stringify({ id: r.id, created: r.created, miv: r.miv, meta: b64e(new Uint8Array(r.meta)), iiv: r.iiv, img: b64e(new Uint8Array(r.img)) });
+        const chunks = []; for (let i = 0; i < body.length; i += VCHUNK) chunks.push(body.slice(i, i + VCHUNK));
+        await req('vault_put', { id: r.id, created: r.created, chunks });
+        await IDB.put({ ...r, up: true }); inCloud.add(r.id);
+      }
+      // fehlende Einträge aus der Tabelle laden (neues Handy oder zweites Gerät)
+      const missing = cloud.filter(c => inCloud.has(c.id) && !have.has(c.id) && !tombs.includes(c.id));
+      for (let i = 0; i < missing.length; i++) {
+        if (progress) progress(i, missing.length);
+        const g = await req('vault_get', { id: missing[i].id });
+        const e = JSON.parse(g.chunks.join(''));
+        if (e.id !== missing[i].id) continue;
+        await IDB.put({ id: e.id, person: me, created: e.created, miv: e.miv, meta: b64d(e.meta).buffer, iiv: e.iiv, img: b64d(e.img).buffer, up: true });
+        changed = true;
+      }
+      LS.set('vault.cloud.' + me, { at: new Date().toISOString(), n: inCloud.size, err: null });
+      return { ok: true };
+    } catch (e) {
+      const c = (e && e.code) || 'server';
+      LS.set('vault.cloud.' + me, { ...(vcloud() || {}), err: c });
+      return { ok: false, code: c };
+    } finally {
+      vaultSyncing = null;
+      if (changed && VAULT.key && cfg.me === me) { await loadVault(); if (view === 'vault') render(); }
+      if (view === 'einstellungen') safeRender();
+    }
+  })();
+  return vaultSyncing;
+}
+async function startRestore() {
+  const err = m => { const e = $('#rk-err'); e.textContent = m; e.hidden = false; };
+  const raw = rkDecode($('#rk-in').value);
+  if (!raw) return err('Der Schlüssel hat 32 Zeichen (8 Gruppen à 4). Bitte prüfe deine Eingabe.');
+  if (!cfg.url || !cfg.key) return err('Verbinde zuerst die Google-Tabelle unter Einstellungen.');
+  const btn = $('#rk-go'); btn.disabled = true; btn.textContent = 'Prüfe Schlüssel …';
+  try {
+    const k = await rawKeys(raw);
+    const r = await call({ action: 'vault_list', person: cfg.me, vtoken: k.token }, 30000);
+    LS.set('vault.tok.' + cfg.me, k.token);
+    VAULT.restore = { raw, n: (r.entries || []).length };
+    VAULT.mode = 'set1'; location.hash = '#vault';
+  } catch (e) {
+    btn.disabled = false; btn.textContent = 'Weiter';
+    err(e.code === 'vault_denied' ? 'Dieser Schlüssel passt nicht zu deinem Vault.' : e.code === 'vault_none' ? 'In der Tabelle gibt es noch keine Vault-Sicherung von dir.' : e.code === 'unknown_action' || e.code === 'bad_request' ? 'Das Google-Skript muss zuerst auf Version 3 aktualisiert werden.' : 'Keine Verbindung zur Tabelle. Bitte später noch einmal versuchen.');
+  }
 }
 
 /* ---------- Oberfläche ---------- */
@@ -748,9 +894,96 @@ document.addEventListener('focusout', () => setTimeout(() => {
 
 function exerciseDay(id) { const p = st().plans[cfg.me]; return DAYS.find(d => p[d].exercises.some(x => x.id === id)) || null; }
 
+/* ---------- Hintergrund: Noise-Verlauf (Mechanik wie die Blender-Nodes) ----------
+   Wolken = grobes Gradient-Rauschen, Grain = feines Pixel-Rauschen, gemischt und über eine Rampe
+   von Schwarz zur Tagesfarbe eingefärbt. Das Muster hängt nur von der Position ab: Wird die Seite länger,
+   werden unten einfach neue Abschnitte (je 512 px) dazugerechnet, die nahtlos anschließen. Bestehende bleiben. */
+const BG = (() => {
+  const CHUNK = 512;
+  const TONES = {
+    '': { rgb: [255, 255, 255], str: .3, lo: .56, seed: 5 },
+    y: { rgb: [255, 242, 0], str: .68, lo: .56, seed: 11 },
+    m: { rgb: [236, 0, 140], str: .8, lo: .56, seed: 23 },
+    c: { rgb: [0, 174, 239], str: .8, lo: .56, seed: 37 }
+  };
+  const GAIN = 4.5, GRAIN = .29, CX = .003, CY = .0024;
+  function makeNoise(seed) {
+    let s = seed >>> 0 || 1;
+    const rnd = () => ((s = Math.imul(s ^ (s >>> 15), 0x2c1b3c6d) + 0x6d2b79f5 >>> 0) / 4294967296);
+    const p = new Uint8Array(512), gx = new Float32Array(256), gy = new Float32Array(256), base = [...Array(256).keys()];
+    for (let i = 255; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [base[i], base[j]] = [base[j], base[i]]; }
+    for (let i = 0; i < 512; i++) p[i] = base[i & 255];
+    for (let i = 0; i < 256; i++) { const a = rnd() * Math.PI * 2; gx[i] = Math.cos(a); gy[i] = Math.sin(a); }
+    const fade = t => t * t * t * (t * (t * 6 - 15) + 10);
+    const perlin = (x, y) => {
+      const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi, X = xi & 255, Y = yi & 255;
+      const k00 = p[p[X] + Y], k10 = p[p[X + 1] + Y], k01 = p[p[X] + Y + 1], k11 = p[p[X + 1] + Y + 1];
+      const n00 = gx[k00] * xf + gy[k00] * yf, n10 = gx[k10] * (xf - 1) + gy[k10] * yf;
+      const n01 = gx[k01] * xf + gy[k01] * (yf - 1), n11 = gx[k11] * (xf - 1) + gy[k11] * (yf - 1);
+      const u = fade(xf), v = fade(yf), a = n00 + u * (n10 - n00), b = n01 + u * (n11 - n01);
+      return a + v * (b - a);
+    };
+    // zwei Ebenen, auf die Werteverteilung des Entwurfs normiert
+    return (x, y) => .553 + (perlin(x, y) + .5 * perlin(x * 2 + 17.3, y * 2 + 5.1) + .037) * .4225;
+  }
+  const hash = (x, y, seed) => { let h = Math.imul(x, 374761393) + Math.imul(y, 668265263) + Math.imul(seed, 2246822519 | 0); h = Math.imul(h ^ (h >>> 13), 1274126177); return ((h ^ (h >>> 16)) >>> 0) / 4294967296; };
+  const sets = {};   // je Farbton: { width, noise, canvases[] }
+  let el = null, tone = null, height = 0, queue = false;
+  function draw(t, i) {
+    const S = sets[t], cfg = TONES[t], w = S.width, cv = document.createElement('canvas');
+    cv.width = w; cv.height = CHUNK; cv.style.top = (i * CHUNK) + 'px';
+    const ctx = cv.getContext('2d'), img = ctx.createImageData(w, CHUNK), d = img.data;
+    const cr = cfg.rgb[0] * cfg.str, cg = cfg.rgb[1] * cfg.str, cb = cfg.rgb[2] * cfg.str, y0 = i * CHUNK;
+    for (let y = 0; y < CHUNK; y++) for (let x = 0; x < w; x++) {
+      const v = S.noise(x * CX, (y0 + y) * CY) + GRAIN * (hash(x, y0 + y, cfg.seed) - .5);
+      let k = (v - cfg.lo) * GAIN; k = k < 0 ? 0 : k > 1 ? 1 : k;
+      const o = (y * w + x) * 4; d[o] = cr * k; d[o + 1] = cg * k; d[o + 2] = cb * k; d[o + 3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+    S.canvases[i] = cv;
+  }
+  function fill() {
+    queue = false;
+    if (!el) return;
+    const w = Math.max(1, Math.round(el.clientWidth));
+    let S = sets[tone];
+    if (!S || S.width !== w) S = sets[tone] = { width: w, noise: makeNoise(TONES[tone].seed), canvases: [] };
+    const need = Math.ceil(height / CHUNK);
+    // zuerst der sichtbare Bereich, dann der Rest, ein Abschnitt pro Bild, damit nichts ruckelt
+    const app = $('#app'), first = Math.floor((app ? app.scrollTop : 0) / CHUNK);
+    const order = [...Array(need).keys()].sort((a, b) => Math.abs(a - first) - Math.abs(b - first));
+    const todo = order.find(i => !S.canvases[i]);
+    if (todo !== undefined) { draw(tone, todo); queue = true; requestAnimationFrame(fill); }
+    const want = S.canvases.slice(0, need).filter(Boolean);
+    if (el.childElementCount !== want.length || [...el.children].some((c, i) => c !== want[i])) el.replaceChildren(...want);
+    el.style.height = height + 'px';
+  }
+  function update(nextTone, nextHeight) {
+    el = el || $('#bg');
+    tone = TONES[nextTone] ? nextTone : '';
+    height = Math.ceil(nextHeight);
+    if (!queue) { queue = true; requestAnimationFrame(fill); }
+  }
+  return { update, reset() { for (const k in sets) delete sets[k]; if (el) el.replaceChildren(); update(tone || '', height); } };
+})();
+
+/* #app enthält dauerhaft den Hintergrund (#bg) und die Seite (#page). Nur die Seite wird neu gezeichnet,
+   der Hintergrund bleibt stehen und wächst mit der Seitenhöhe mit. */
+let pageObserver = null;
+function setPage(html, tone) {
+  const app = $('#app');
+  let bg = $('#bg'), page = $('#page');
+  if (!bg || !page) {
+    app.innerHTML = '<div id="bg" aria-hidden="true"></div><div id="page" class="page"></div>';
+    bg = $('#bg'); page = $('#page');
+    if ('ResizeObserver' in window) { pageObserver = new ResizeObserver(() => BG.update(document.body.dataset.tone || '', page.offsetHeight)); pageObserver.observe(page); }
+  }
+  page.innerHTML = html;
+  BG.update(tone, page.offsetHeight);
+}
 function render() {
   const app = $('#app');
-  if (!cfg.me) { document.body.dataset.tone = ''; app.innerHTML = viewSetup(); return; }
+  if (!cfg.me) { document.body.dataset.tone = ''; setPage(viewSetup(), ''); return; }
   const h = decodeURIComponent(location.hash.slice(1)) || 'start';
   const [name, arg] = h.includes(':') ? [h.slice(0, h.indexOf(':')), h.slice(h.indexOf(':') + 1)] : [h, ''];
   if (name !== view) { skipAsk = resetAsk = false; if (view.startsWith('vault') && !name.startsWith('vault')) lockVault(); }
@@ -761,24 +994,36 @@ function render() {
     case 'plan': html = head('Plan') + `<main class="view">${viewPlan()}</main>` + tabbar('plan'); break;
     case 'notizen': html = head('Notizen') + `<main class="view">${viewNotes()}</main>` + tabbar('notizen'); break;
     case 'glocke': html = subhead(draft ? 'training' : 'start') + `<main class="view">${viewBell()}</main>` + (draft ? '' : tabbar('')); break;
-    case 'einstellungen': html = subhead(draft ? 'training' : 'start') + `<main class="view">${viewSettings()}</main>` + tabbar(''); break;
+    case 'einstellungen': html = subhead(draft ? 'training' : 'start') + `<main class="view nobar">${viewSettings()}</main>`; break;
     case 'gewicht': html = subhead('profil') + `<main class="view">${viewBodyweight()}</main>` + tabbar('profil'); break;
     case 'profil': html = (arg && arg !== cfg.me ? subhead('start') : `<header class="head" id="head"><div class="brand"></div>${gearBtn()}</header>`) + `<main class="view">${viewProfile(arg && PEOPLE.includes(arg) ? arg : cfg.me)}</main>` + tabbar(arg && arg !== cfg.me ? '' : 'profil'); break;
-    case 'vault': html = subhead('profil', VAULT.key && VAULT.mode === 'unlock' ? `<button class="btn small glass" data-act="v-lock" style="border-color:rgba(255,255,255,.3)">${ICON.lock.replace('width="22" height="22"', 'width="16" height="16"')} Sperren</button>` : '') + `<main class="view">${viewVault()}</main>`; break;
-    case 'vault-neu': if (!VAULT.key) { location.hash = '#vault'; return; } html = subhead('vault') + `<main class="view">${viewVaultNew()}</main>`; break;
+    case 'vault': html = subhead('profil', VAULT.key && VAULT.mode === 'unlock' && !VAULT.showKey ? `<button class="btn small glass" data-act="v-lock" style="border-color:rgba(255,255,255,.3)">${ICON.lock.replace('width="22" height="22"', 'width="16" height="16"')} Sperren</button>` : '') + `<main class="view nobar">${viewVault()}</main>`; break;
+    case 'vault-wiederherstellen': html = subhead(vmeta() ? 'einstellungen' : 'vault') + `<main class="view nobar">${viewRestore()}</main>`; break;
+    case 'vault-neu': if (!VAULT.key) { location.hash = '#vault'; return; } html = subhead('vault') + `<main class="view nobar">${viewVaultNew()}</main>`; break;
     case 'uebung': html = subhead('verlauf') + `<main class="view">${viewExercise(arg)}</main>` + tabbar('verlauf'); tone = DAY_TONE[exerciseDay(arg)] || ''; break;
     case 'training-log': { html = subhead('verlauf') + `<main class="view">${viewWorkout(arg)}</main>` + tabbar('verlauf'); const w = st().workouts.find(x => x.id === arg); tone = w ? DAY_TONE[w.data.day] : ''; break; }
     default: html = `<header class="head" id="head"><div class="brand">Hantelbuch</div>${bellBtn()}${gearBtn()}</header><main class="view">${viewStart()}</main>` + tabbar('start');
   }
   document.body.dataset.tone = tone;
-  app.innerHTML = html;
-  if (name !== view) { window.scrollTo(0, 0); view = name; }
+  setPage(html, tone);
+  if (name !== view) { app.scrollTop = 0; view = name; }
   pendingRender = false;
   onScroll();
   if (name === 'vault') fillVaultImages();
 }
-function onScroll() { const h = $('#head'); if (h) h.classList.toggle('scrolled', window.scrollY > 4); }
-window.addEventListener('scroll', onScroll, { passive: true });
+function onScroll() { const h = $('#head'); if (h) h.classList.toggle('scrolled', $('#app').scrollTop > 4); const sh = $('.sheet.full'); if (sh) sh.classList.toggle('scrolled', sh.scrollTop > 40); }
+document.addEventListener('scroll', onScroll, { passive: true, capture: true });
+/* Echte Bildschirmhöhe: Als App vom Home-Bildschirm meldet iOS teils eine zu kleine Höhe, dann entstünde unten ein Balken. */
+function setHeight() {
+  let h = window.innerHeight;
+  const standalone = navigator.standalone || matchMedia('(display-mode: standalone)').matches;
+  if (standalone && /iPhone|iPad|iPod/.test(navigator.userAgent)) h = Math.max(h, matchMedia('(orientation: portrait)').matches ? screen.height : screen.width);
+  document.documentElement.style.setProperty('--H', h + 'px');
+}
+setHeight();
+window.addEventListener('resize', setHeight);
+let bgW = innerWidth; window.addEventListener('resize', () => { if (innerWidth !== bgW) { bgW = innerWidth; BG.reset(); } });
+window.addEventListener('orientationchange', () => setTimeout(setHeight, 300));
 
 /* ---------- Start ---------- */
 function syncLine() {
@@ -1060,7 +1305,8 @@ function knownExercises() {
 function swapForm(i) {
   const it = draft.items[i], x = it.ex;
   const names = [...knownExercises().values()].map(v => v.name).filter(n => n !== x.name).sort((a, b) => a.localeCompare(b, 'de'));
-  $('#modal').innerHTML = `<div class="backdrop" data-act="mclose-bg"><form class="sheet form" id="swapform" data-i="${i}" novalidate>
+  $('#modal').innerHTML = `<div class="backdrop" data-act="mclose-bg"><form class="sheet full form" id="swapform" data-i="${i}" novalidate>
+    ${sheetHead(`${esc(dl(draft.day))} · ${esc(x.name)}`, 'Heute tauschen')}
     <h2>Heute tauschen</h2>
     <p class="help" style="margin:0">Ersetzt <b>${esc(x.name)}</b> nur in diesem Training. Dein Plan bleibt unverändert, die Ersatzübung bekommt ihren eigenen Verlauf.</p>
     <label>Ersatzübung<input class="inp" id="sw-name" name="name" list="sw-list" maxlength="60" autocomplete="off" required placeholder="z. B. Brustpresse Maschine"><datalist id="sw-list">${names.map(n => `<option value="${esc(n)}"></option>`).join('')}</datalist></label>
@@ -1071,7 +1317,7 @@ function swapForm(i) {
       <label class="chk"><input type="radio" name="who" value="me"><span>Nur für mich</span></label>
     </fieldset>
     <div class="err" id="sw-err" hidden></div>
-    <div class="btnrow"><button class="btn primary" type="submit">Tauschen</button><button class="btn ghost" type="button" data-act="mclose">Abbrechen</button></div>
+    <div class="sbar"><button class="btn primary" type="submit">Tauschen</button></div>
   </form></div>`;
   setTimeout(() => { const n = $('#sw-name'); if (n) n.focus(); }, 50);
 }
@@ -1268,11 +1514,30 @@ function pinPad() {
     <div class="pins ${VAULT.bad ? 'bad' : ''}" aria-label="${VAULT.pin.length} von 4 Ziffern eingegeben">${dots}</div>
     ${VAULT.msg ? `<span class="${/Falsch|stimmen|Zu viele/.test(VAULT.msg) ? 'err' : 'muted'}">${esc(VAULT.msg)}</span>` : ''}
     <div class="pad">${k(1)}${k(2)}${k(3)}${k(4)}${k(5)}${k(6)}${k(7)}${k(8)}${k(9)}<a class="key plain" href="#${mode === 'old' || mode.startsWith('new') ? 'einstellungen' : 'profil'}">Abbrechen</a>${k(0)}<button class="key plain" data-act="pin-del" aria-label="Letzte Ziffer löschen">${ICON.del}</button></div>
-    <span class="small muted" style="max-width:300px">${mode === 'set1' || mode === 'set2' ? 'Den Code brauchst du bei jedem Öffnen. Ohne ihn lassen sich die Bilder nicht wiederherstellen.' : 'Der Vault liegt nur auf diesem Handy und ist nur mit deinem Code lesbar.'}</span></div>`;
+    ${mode === 'set1' && !VAULT.restore ? `<a class="lnk" href="#vault-wiederherstellen" style="font-weight:600">Schon einen Vault? Wiederherstellen</a>` : ''}
+    <span class="small muted" style="max-width:300px">${VAULT.restore ? `Schlüssel passt. Lege jetzt den Code für dieses Handy fest${VAULT.restore.n ? `, danach werden ${VAULT.restore.n} ${VAULT.restore.n === 1 ? 'Bild' : 'Bilder'} geladen` : ''}.` : mode === 'set1' || mode === 'set2' ? 'Den Code brauchst du bei jedem Öffnen auf diesem Handy.' : 'Nur mit deinem Code lesbar. Niemand sonst sieht deine Bilder.'}</span></div>`;
+}
+function viewRecoveryKey() {
+  return `<div class="lock"><span class="ic glass">${ICON.key}</span><h1 class="display" style="font-size:26px">Dein Wiederherstellungs&shy;schlüssel</h1>
+    <span class="muted" style="max-width:330px">Damit holst du deine Bilder auf ein neues Handy. Speichere ihn jetzt an einem sicheren Ort, z. B. in Apple Passwörter oder einer gesperrten Notiz.</span>
+    <div class="rkey mono" id="rk-show">${VAULT.showKey.split('-').map(g => `<span>${g}</span>`).join('')}</div>
+    <button class="btn glass" data-act="rk-copy" style="min-width:200px">Kopieren</button>
+    <button class="btn primary" data-act="rk-done" style="min-width:260px">Ich habe ihn gespeichert</button>
+    <span class="small muted" style="max-width:320px">Ohne diesen Schlüssel lassen sich die Bilder bei einem Handywechsel nicht wiederherstellen. Gib ihn niemandem, auch nicht ${esc(partner())}.</span></div>`;
+}
+function viewRestore() {
+  return `<div class="form">
+    <h1 class="display" style="font-size:30px">Vault wieder&shy;herstellen</h1>
+    <p class="muted" style="margin:0">Gib deinen Wiederherstellungsschlüssel ein. Danach legst du einen Code für dieses Handy fest und deine Bilder werden aus der Tabelle geladen.</p>
+    <label>Wiederherstellungsschlüssel<textarea class="inp mono" id="rk-in" rows="2" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX-XXXX"></textarea></label>
+    <div class="err" id="rk-err" hidden></div>
+    <button class="btn primary" id="rk-go" data-act="rk-restore">Weiter</button>
+  </div>`;
 }
 function viewVault() {
   if (!vmeta() && !VAULT.importData) { if (VAULT.mode !== 'set2') VAULT.mode = 'set1'; return pinPad(); }
   if (!VAULT.key || VAULT.mode !== 'unlock') return pinPad();
+  if (VAULT.showKey) return viewRecoveryKey();
   const list = VAULT.entries || [];
   const items = list.map(e => `<div class="en">
       <div class="rowbetween"><b class="mono" style="font-size:14px">${fmtLong(e.date + 'T12:00')}</b><span class="mono muted small">${relDay(e.date + 'T12:00')}</span></div>
@@ -1281,6 +1546,7 @@ function viewVault() {
       ${VAULT.del === e.id ? `<div class="confirm"><b>Bild endgültig löschen?</b><div class="btnrow"><button class="btn small danger" data-act="v-del-yes" data-id="${esc(e.id)}">Löschen</button><button class="btn small ghost" data-act="v-del-no">Abbrechen</button></div></div>` : `<button class="addset" data-act="v-del" data-id="${esc(e.id)}" style="align-self:flex-start;color:var(--dim)">Löschen</button>`}
     </div>`).join('');
   return `<div class="rowbetween" style="align-items:flex-end"><div style="display:flex;flex-direction:column;gap:6px"><h1 class="display" style="font-size:40px">Vault</h1><span class="mono muted small">${list.length} ${list.length === 1 ? 'Bild' : 'Bilder'}${list.length ? ' · seit ' + new Date(list[list.length - 1].date + 'T12:00').toLocaleDateString('de-DE') : ''}</span></div><a class="btn primary small" href="#vault-neu">${ICON.plus} Foto</a></div>
+    ${VAULT.msg ? `<span class="muted small">${esc(VAULT.msg)}</span>` : ''}
     ${list.length ? `<div class="tl">${items}</div>` : `<section class="card"><div class="empty">Noch keine Bilder. Mit „Foto“ legst du dein erstes Fortschrittsbild an. Tipp: gleiche Stelle, gleiches Licht, gleiche Pose.</div></section>`}`;
 }
 function viewVaultNew() {
@@ -1290,11 +1556,11 @@ function viewVaultNew() {
     <div class="pickphoto glass">${VAULT.photoUrl ? `<img src="${VAULT.photoUrl}" alt="Gewähltes Foto">` : `${ICON.cam}<b>Foto aufnehmen oder auswählen</b><span class="small muted">Tipp: gleiche Stelle, gleiches Licht, gleiche Pose</span>`}
       <input type="file" id="vn-file" accept="image/*" aria-label="Foto aufnehmen oder auswählen"></div>
     <div class="grid2"><label>Datum<input class="inp mono" type="date" id="vn-date" name="date" value="${todayStr()}" max="${todayStr()}"></label>
-      <label>Körpergewicht (kg)<input class="inp mono" id="vn-bw" name="bw" inputmode="decimal" value="${lb ? fmtIn(lb.kg) : ''}" placeholder="optional"></label></div>
+      <label>Gewicht (kg)<input class="inp mono" id="vn-bw" name="bw" inputmode="decimal" value="${lb ? fmtIn(lb.kg) : ''}" placeholder="optional"></label></div>
     <label>Notiz<textarea id="vn-note" name="note" rows="3" maxlength="2000" placeholder="z. B. Pump nach B&T, Brust oben voller"></textarea></label>
     <div class="err" id="vn-err" hidden></div>
     <button class="btn primary" id="vn-save" type="submit">Im Vault speichern</button>
-    <span class="small muted" style="text-align:center">Wird nur auf diesem Handy gespeichert, verschlüsselt mit deinem Code. ${esc(partner())} sieht es nie.</span>
+    <span class="small muted" style="text-align:center">Wird verschlüsselt gespeichert und in eurer Tabelle gesichert. Lesbar nur mit deinem Schlüssel, ${esc(partner())} sieht es nie.</span>
   </form>`;
 }
 
@@ -1396,12 +1662,14 @@ function viewPlan() {
     ${b.dirty[d] ? `<div style="height:56px"></div><div class="savebar"><span>${esc(w.short || DAY_SHORT[d])} geändert</span><button class="btn ghost" data-act="bdiscard">Verwerfen</button><button class="btn primary" data-act="bsave">Speichern</button></div>` : ''}`;
 }
 function markDirty() { builder.dirty[builder.day] = diffPlan(st().plans[cfg.me][builder.day], builder.work[builder.day], false).length > 0; }
+const sheetHead = (eyebrow, title) => `<div class="shead"><button type="button" class="iconbtn" data-act="mclose" aria-label="Zurück ohne Speichern">${ICON.left}</button><span class="shead-t"><span class="eyebrow">${eyebrow}</span><b>${title}</b></span></div>`;
 function exerciseForm(mode, i) {
   const w = builder.work[builder.day];
   const old = mode === 'add' ? null : w.exercises[i];
   const x = mode === 'edit' ? old : { id: '', name: '', type: old ? old.type : 'kg', sets: old ? old.sets : 3, min: old ? old.min : 8, max: old ? old.max : 12, step: old ? old.step : 2.5, cue: '', video: '', image: '', warmup: false, personal: old ? old.personal : false };
   const title = mode === 'add' ? 'Neue Übung' : mode === 'edit' ? 'Übung bearbeiten' : 'Übung austauschen';
-  $('#modal').innerHTML = `<div class="backdrop" data-act="mclose-bg"><form class="sheet form" id="exform" data-mode="${mode}" data-i="${i ?? ''}" novalidate>
+  $('#modal').innerHTML = `<div class="backdrop" data-act="mclose-bg"><form class="sheet full form" id="exform" data-mode="${mode}" data-i="${i ?? ''}" novalidate>
+    ${sheetHead(`${esc(w.short || DAY_SHORT[builder.day])} · ${esc(w.title || '')}`, title)}
     <h2>${title}</h2>
     ${mode === 'replace' ? `<p class="help" style="margin:0">Ersetzt <b>${esc(old.name)}</b>. Deren bisherige Einträge bleiben im Archiv erhalten.</p>` : ''}
     ${mode === 'edit' ? `<p class="help" style="margin:0">Änderungen hier gelten für dieselbe Übung, ihr Verlauf läuft weiter. Für eine andere Übung nutze „Austauschen“.</p>` : ''}
@@ -1419,7 +1687,7 @@ function exerciseForm(mode, i) {
       <label>Bild-Link (optional)<input class="inp" id="f-image" name="image" type="url" inputmode="url" value="${esc(x.image)}" placeholder="https://…/bild.jpg"></label>
     </div>
     <div class="err" id="f-err" hidden></div>
-    <div class="btnrow"><button class="btn primary" type="submit">${mode === 'replace' ? 'Austauschen' : 'Übernehmen'}</button><button class="btn ghost" type="button" data-act="mclose">Abbrechen</button></div>
+    <div class="sbar"><button class="btn primary" type="submit">${mode === 'replace' ? 'Austauschen' : 'Übernehmen'}</button></div>
   </form></div>`;
   setTimeout(() => { const n = $('#f-name'); if (n && mode !== 'edit') n.focus(); }, 50);
 }
@@ -1463,8 +1731,11 @@ function viewSettings() {
     <div class="secl">Vault</div>
     <div class="rows glass">
       ${hasVault ? `<button class="row" data-act="v-change">Vault-Code ändern<span class="v">• • • •</span></button>
-      <button class="row" data-act="v-export">Backup sichern<span class="v">verschlüsselte Datei</span></button>` : `<a class="row" href="#vault">Vault einrichten<span class="v">Code festlegen</span></a>`}
-      <label class="row">Backup laden<span class="v">Datei wählen</span><input type="file" id="v-import" accept="application/json,.json" hidden></label>
+      <button class="row" data-act="v-showkey">Wiederherstellungsschlüssel<span class="v"${vmeta().saved ? '' : ' style="color:var(--warn)"'}>${vmeta().saved ? 'anzeigen' : 'noch nicht notiert'}</span></button>
+      <div class="row">Sicherung in der Tabelle<span class="v">${vaultCloudText()}</span></div>
+      <button class="row" data-act="v-export">Backup als Datei<span class="v">sichern</span></button>` : `<a class="row" href="#vault">Vault einrichten<span class="v">Code festlegen</span></a>
+      <a class="row" href="#vault-wiederherstellen">Vault wiederherstellen<span class="v">mit Schlüssel</span></a>`}
+      <label class="row">Backup-Datei laden<span class="v">Datei wählen</span><input type="file" id="v-import" accept="application/json,.json" hidden></label>
     </div>
     <div class="secl">Sync mit Google-Tabelle</div>
     <section class="card form">
@@ -1486,6 +1757,16 @@ function viewSettings() {
       <span class="small muted">Löscht nur die Kopie des Trainingslogs auf diesem Handy. Beim nächsten Sync wird alles aus der Tabelle neu geladen. Der Vault bleibt erhalten.${waiting ? ` <b>${waiting} noch nicht gesendete Einträge gehen dabei verloren.</b>` : ''}</span>
       ${resetAsk ? `<div class="btnrow"><button class="btn small danger" data-act="reset-yes">Ja, zurücksetzen</button><button class="btn small ghost" data-act="reset-no">Abbrechen</button></div>` : `<button class="btn danger" data-act="reset-ask">Zurücksetzen</button>`}
     </section>`;
+}
+function vaultCloudText() {
+  const m = vmeta(), c = vcloud();
+  if (!m || m.v !== 2) return 'nach dem nächsten Öffnen';
+  if (!cfg.url) return 'Tabelle nicht verbunden';
+  if (scriptVersion != null && scriptVersion < 3) return 'Skript-Version 3 nötig';
+  if (vaultSyncing) return 'läuft …';
+  if (!c) return 'noch nicht gesichert';
+  if (c.err) return c.err === 'vault_denied' ? 'Zugang abgelehnt' : 'zuletzt fehlgeschlagen';
+  return `${c.n} ${c.n === 1 ? 'Bild' : 'Bilder'} · ${fmtDate(c.at)}, ${fmtTime(c.at)}`;
 }
 let setupMe = null;
 function viewSetup() {
@@ -1579,7 +1860,11 @@ const actions = {
   'v-lock': () => { lockVault(); location.hash = '#profil'; },
   'v-del': t => { VAULT.del = t.dataset.id; render(); },
   'v-del-no': () => { VAULT.del = null; render(); },
-  'v-del-yes': async t => { await IDB.del(t.dataset.id); if (VAULT.urls[t.dataset.id]) { URL.revokeObjectURL(VAULT.urls[t.dataset.id]); delete VAULT.urls[t.dataset.id]; } VAULT.del = null; await loadVault(); toast('Bild gelöscht'); render(); },
+  'rk-copy': async () => { try { await navigator.clipboard.writeText(VAULT.showKey); toast('Schlüssel kopiert'); } catch (e) { const r = document.createRange(); r.selectNodeContents($('#rk-show')); const sel = getSelection(); sel.removeAllRanges(); sel.addRange(r); toast('Markiert. Jetzt über „Kopieren“ kopieren.'); } },
+  'rk-done': () => { const m = vmeta(); if (m) { m.saved = true; LS.set('vault.' + cfg.me, m); } VAULT.showKey = null; loadVault().then(render); },
+  'rk-restore': () => startRestore(),
+  'v-showkey': () => { lockVault(); VAULT.wantKey = true; location.hash = '#vault'; render(); },
+  'v-del-yes': async t => { await deleteVaultEntry(t.dataset.id); if (VAULT.urls[t.dataset.id]) { URL.revokeObjectURL(VAULT.urls[t.dataset.id]); delete VAULT.urls[t.dataset.id]; } VAULT.del = null; await loadVault(); toast('Bild gelöscht'); render(); },
   'v-change': () => { lockVault(); VAULT.mode = 'old'; location.hash = '#vault'; render(); },
   'v-export': () => exportVault(),
   's-save': async () => { const ok = await testAndSave($('#s-url').value, $('#s-key').value, $('#s-err')); if (ok) { toast('Verbunden'); sync({ overlay: true }); } },
