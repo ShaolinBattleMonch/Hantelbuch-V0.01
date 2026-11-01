@@ -1,23 +1,27 @@
 'use strict';
 /* Hantelbuch – Trainings-App für Manu & Rob.
-   Alles, was passiert (Training, Skip, Planänderung, Tausch, Körpergewicht), wird als Eintrag in einem Log gespeichert:
-   zuerst auf dem Handy, beim Sync in der Google-Tabelle. Der aktuelle Stand wird immer aus dem Log berechnet. */
+   Alles, was passiert (Training, Skip, Planänderung, Tausch, Körpergewicht, Profilbild), wird als Eintrag in einem Log gespeichert:
+   zuerst auf dem Handy, beim Sync in der Google-Tabelle. Der aktuelle Stand wird immer aus dem Log berechnet.
+   Ausnahme: der Vault. Seine Bilder bleiben verschlüsselt nur auf diesem Handy und werden nie synchronisiert. */
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.2.0';
 const SCRIPT_MIN = 2;            // benötigte Version des Google-Skripts
 const PEOPLE = ['Manu', 'Rob'];
-const DAYS = ['A', 'B', 'C'];
+const DAYS = ['A', 'B', 'C'];    // interne Kennung der Trainingstage, angezeigt werden die Kürzel
+const DAY_SHORT = { A: 'B&T', B: 'R&B', C: 'B&B' };
+const DAY_TONE = { A: 'y', B: 'm', C: 'c' };   // Gelb, Magenta, Cyan
 const TYPE_LABEL = { kg: 'Gewicht', bw: 'Körpergewicht', time: 'Zeit' };
 const WARMUP_DEFAULT = new Set(['bankdruecken', 'lh-rudern', 'kniebeugen', 'rdl']);
+const WARMUP = [0.6, 6];         // ein Aufwärmsatz: 60 % × 6
 const FEEL = { leicht: 'Leicht', passt: 'Passt', schwer: 'Schwer' };
-const DELOAD_WEEKS = 8;          // Deload nach so vielen Trainingswochen …
-const DELOAD_WEEKS_PLATEAU = 4;  // … oder früher, wenn mindestens 2 Übungen stagnieren
+const DELOAD_WEEKS = 8;
+const DELOAD_WEEKS_PLATEAU = 4;
 
 function ex(id, name, type, sets, min, max, step, cue) {
   return { id, name, type, sets, min, max, step, cue, video: '', image: '', warmup: WARMUP_DEFAULT.has(id), personal: false };
 }
 const DEFAULT_PLAN = {
-  A: { title: 'Brust & Trizeps', exercises: [
+  A: { title: 'Brust & Trizeps', short: 'B&T', exercises: [
     ex('bankdruecken', 'Bankdrücken (Langhantel)', 'kg', 4, 6, 8, 2.5, 'Schulterblätter zusammen, Füße fest am Boden, Stange zur unteren Brust führen, Ellbogen ca. 45° vom Körper.'),
     ex('schraegbank', 'Schrägbankdrücken (Kurzhantel, 30°)', 'kg', 3, 8, 12, 2, 'Hanteln tief absenken, oben nicht zusammenschlagen.'),
     ex('dips', 'Dips (Brust-Fokus)', 'bw', 3, 8, 12, 2.5, 'Oberkörper leicht nach vorn, absenken bis der Oberarm parallel zum Boden ist.'),
@@ -25,7 +29,7 @@ const DEFAULT_PLAN = {
     ex('ueberkopf-trizeps', 'Überkopf-Trizepsstrecken am Kabel', 'kg', 3, 10, 12, 1.25, 'Ellbogen eng und fix, volle Dehnung hinter dem Kopf.'),
     ex('trizeps-seil', 'Trizepsdrücken am Kabel (Seil)', 'kg', 3, 12, 15, 1.25, 'Oberarme am Körper, unten das Seil auseinanderziehen.')
   ] },
-  B: { title: 'Rücken & Bizeps', exercises: [
+  B: { title: 'Rücken & Bizeps', short: 'R&B', exercises: [
     ex('klimmzuege', 'Klimmzüge', 'bw', 4, 6, 10, 2.5, 'Schulterblätter zuerst nach unten ziehen, Brust zur Stange, unten ganz ausstrecken. Mit Unterstützung: Gewicht negativ eintragen.'),
     ex('lh-rudern', 'Langhantelrudern vorgebeugt', 'kg', 4, 6, 8, 2.5, 'Rücken gerade, Oberkörper ca. 45°, Stange zum Bauchnabel ziehen.'),
     ex('kabelrudern', 'Kabelrudern sitzend (enger Griff)', 'kg', 3, 10, 12, 2.5, 'Brust raus, Ellbogen eng nach hinten, vorne kontrolliert dehnen.'),
@@ -33,7 +37,7 @@ const DEFAULT_PLAN = {
     ex('sz-curls', 'Langhantel-Curls (SZ-Stange)', 'kg', 3, 8, 12, 2.5, 'Ellbogen am Körper, kein Schwung aus dem Rücken.'),
     ex('hammer-curls', 'Hammer-Curls (Kurzhantel)', 'kg', 3, 10, 12, 2, 'Neutraler Griff, langsam absenken.')
   ] },
-  C: { title: 'Beine & Bauch', exercises: [
+  C: { title: 'Beine & Bauch', short: 'B&B', exercises: [
     ex('kniebeugen', 'Kniebeugen (Langhantel)', 'kg', 4, 6, 8, 2.5, 'Füße schulterbreit, Knie über den Zehen, mindestens bis Oberschenkel parallel, Rücken neutral.'),
     ex('rdl', 'Rumänisches Kreuzheben', 'kg', 3, 8, 10, 2.5, 'Knie leicht gebeugt, Hüfte nach hinten schieben, Stange nah am Bein, Dehnung im Beinbizeps.'),
     ex('beinpresse', 'Beinpresse', 'kg', 3, 10, 12, 5, 'Unterer Rücken bleibt am Polster, Knie oben nicht ganz durchstrecken.'),
@@ -55,10 +59,10 @@ const fmtN = n => (Math.round(n * 100) / 100).toLocaleString('de-DE');
 const fmtIn = n => (n == null || n === '' ? '' : String(Math.round(Math.abs(n) * 100) / 100).replace('.', ','));
 const fmtSigned = w => (w > 0 ? '+' : w < 0 ? '−' : '') + fmtN(Math.abs(w)) + ' kg';
 const fmtDate = iso => new Date(iso).toLocaleDateString('de-DE', { weekday: 'short', day: '2-digit', month: '2-digit' });
+const fmtLong = iso => new Date(iso).toLocaleDateString('de-DE', { weekday: 'short', day: '2-digit', month: '2-digit', year: 'numeric' });
 const fmtTime = iso => new Date(iso).toLocaleTimeString('de-DE', { hour: '2-digit', minute: '2-digit' });
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const gen = p => (/s$/.test(p) ? p + "'" : p + 's');
-const cls = p => (p === 'Rob' ? 'rob' : 'manu');
 const partner = () => PEOPLE.find(p => p !== cfg.me);
 const sum = a => a.reduce((x, y) => x + y, 0);
 const avg = a => (a.length ? sum(a) / a.length : 0);
@@ -78,21 +82,35 @@ function relDay(iso) {
 function duration(a, b) { const m = Math.max(1, Math.round((new Date(b) - new Date(a)) / 60000)); return m >= 60 ? `${Math.floor(m / 60)} h ${m % 60} min` : `${m} min`; }
 function weekStart() { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), d.getDate() - (d.getDay() + 6) % 7); }
 
+// Tageskürzel (z. B. B&T) und Tagesfarbe
+const dl = (d, p) => { const pl = st().plans[p || cfg.me][d]; return (pl && pl.short) || DAY_SHORT[d]; };
+const dayChip = (d, p, extra = '') => `<span class="day t-${DAY_TONE[d]} ${extra}">${esc(dl(d, p))}</span>`;
+// Avatar: Profilbild oder Glas mit weißem Buchstaben
+function avatar(p, size = 32) {
+  const img = st().avatars[p];
+  const st_ = `width:${size}px;height:${size}px;font-size:${Math.round(size * 0.4)}px`;
+  return img ? `<img class="av" src="${esc(img)}" alt="${esc(p)}" style="${st_}">` : `<span class="av" style="${st_}" aria-hidden="true">${esc(p[0])}</span>`;
+}
+
 const ICON = {
-  bell: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>',
-  gear: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>',
-  home: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 6.5v11M17.5 6.5v11M3.5 9v6M20.5 9v6M6.5 12h11"/></svg>',
-  chart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="m7 15 4-4 3 3 5-6"/></svg>',
-  list: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6h11M9 12h11M9 18h11"/><path d="M4 6h.01M4 12h.01M4 18h.01"/></svg>',
-  note: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M8 13h8M8 17h5"/></svg>',
-  check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5 9-10"/></svg>',
-  up: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 15 6-6 6 6"/></svg>',
-  down: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>',
-  left: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>',
-  right: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg>',
-  back: '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg>',
-  swap: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4 3 8l4 4"/><path d="M3 8h13"/><path d="m17 20 4-4-4-4"/><path d="M21 16H8"/></svg>',
-  sync: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 1-15.5 6.2L3 16"/><path d="M3 12a9 9 0 0 1 15.5-6.2L21 8"/><path d="M21 3v5h-5M3 21v-5h5"/></svg>'
+  bell: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>',
+  gear: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg>',
+  home: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 6.5v11M17.5 6.5v11M3.5 9v6M20.5 9v6M6.5 12h11"/></svg>',
+  chart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v18h18"/><path d="m7 15 4-4 3 3 5-6"/></svg>',
+  list: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11"/><path d="M4 6h.01M4 12h.01M4 18h.01"/></svg>',
+  note: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M8 13h8M8 17h5"/></svg>',
+  check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12 5 5 9-10"/></svg>',
+  up: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 15 6-6 6 6"/></svg>',
+  down: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>',
+  left: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>',
+  right: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg>',
+  x: '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>',
+  swap: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 4 3 8l4 4"/><path d="M3 8h13"/><path d="m17 20 4-4-4-4"/><path d="M21 16H8"/></svg>',
+  sync: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12a9 9 0 0 1-15.5 6.2L3 16"/><path d="M3 12a9 9 0 0 1 15.5-6.2L21 8"/><path d="M21 3v5h-5M3 21v-5h5"/></svg>',
+  lock: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>',
+  cam: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>',
+  plus: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>',
+  del: '<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 5H9l-6 7 6 7h12z"/><path d="m16 9-5 6M11 9l5 6"/></svg>'
 };
 
 /* ---------- Lokaler Speicher ---------- */
@@ -101,8 +119,8 @@ const LS = {
   set(k, v) { try { localStorage.setItem('hb.' + k, JSON.stringify(v)); } catch (e) { toast('Speichern auf dem Handy fehlgeschlagen. Ist der Speicher voll?'); } }
 };
 let cfg = LS.get('cfg', { me: null, url: '', key: '' });
-let events = LS.get('events', []);     // aus der Tabelle, mit laufender Nummer (seq)
-let pending = LS.get('pending', []);   // auf diesem Handy erstellt, noch nicht zurückgelesen
+let events = LS.get('events', []);
+let pending = LS.get('pending', []);
 let lastSeq = LS.get('lastSeq', 0);
 let lastSync = LS.get('lastSync', null);
 let scriptVersion = LS.get('scriptVersion', null);
@@ -111,7 +129,6 @@ let seenIds = new Set(events.map(e => e.id));
 
 function saveLog() { LS.set('events', events); LS.set('pending', pending); LS.set('lastSeq', lastSeq); }
 function saveDraft() { LS.set('draft', draft); }
-
 function addEvent(type, data, summary) {
   const e = { id: uid(), ts: new Date().toISOString(), person: cfg.me, type, data, summary };
   pending.push(e); saveLog(); invalidate();
@@ -135,7 +152,10 @@ function cleanEx(x) {
   if (x.replaces) o.replaces = str(x.replaces, 64);
   return o;
 }
-function cleanPlan(p, day) { return { title: str(p && p.title, 40) || DEFAULT_PLAN[day].title, exercises: (Array.isArray(p && p.exercises) ? p.exercises : []).slice(0, 25).map(cleanEx) }; }
+function cleanPlan(p, day) {
+  return { title: str(p && p.title, 40) || DEFAULT_PLAN[day].title, short: str(p && p.short, 6).trim() || DAY_SHORT[day],
+    exercises: (Array.isArray(p && p.exercises) ? p.exercises : []).slice(0, 25).map(cleanEx) };
+}
 function cleanEntry(en) {
   en = en || {};
   const type = TYPE_LABEL[en.type] ? en.type : 'kg';
@@ -144,6 +164,7 @@ function cleanEntry(en) {
     sets: (Array.isArray(en.sets) ? en.sets : []).slice(0, 20).map(s => type === 'time' ? { r: int(s && s.r) } : { w: num(s && s.w), r: int(s && s.r) })
   };
 }
+const AVATAR_RE = /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/]+=*$/;
 
 /* ---------- Zustand aus dem Log berechnen ---------- */
 let _st = null;
@@ -153,12 +174,14 @@ function st() { return _st || (_st = buildState()); }
 function buildState() {
   const all = events.slice().sort((a, b) => a.seq - b.seq)
     .concat(pending.filter(p => !seenIds.has(p.id)).sort((a, b) => a.ts.localeCompare(b.ts)));
-  const s = { plans: {}, last: {}, workouts: [], skips: [], swaps: [], feed: [], changes: {}, lastChange: {}, lastShared: {}, decisions: {}, lastAction: {}, hist: {}, exInfo: {}, bw: {} };
+  const s = { plans: {}, last: {}, workouts: [], skips: [], swaps: [], feed: [], changes: {}, lastChange: {}, lastShared: {}, decisions: {}, lastAction: {}, hist: {}, exInfo: {}, bw: {}, avatars: {}, first: {} };
+  _st = s; // für dl() während des Aufbaus
   PEOPLE.forEach(p => { s.plans[p] = clone(DEFAULT_PLAN); s.hist[p] = {}; s.last[p] = null; s.bw[p] = []; });
   DAYS.forEach(d => DEFAULT_PLAN[d].exercises.forEach(x => { s.exInfo[x.id] = { name: x.name, type: x.type }; }));
   all.forEach((e, k) => {
     if (!PEOPLE.includes(e.person) || !e.id || !e.ts) return;
     const d = e.data || {}; e.k = k;
+    if (!s.first[e.person]) s.first[e.person] = e.ts;
     if (e.type === 'workout') {
       if (!DAYS.includes(d.day)) return;
       d.title = str(d.title, 40); d.entries = (Array.isArray(d.entries) ? d.entries : []).map(cleanEntry);
@@ -176,8 +199,7 @@ function buildState() {
       s.last[e.person] = { day: d.day, ts: e.ts, kind: 'skip' }; s.skips.push(e); s.feed.push(e);
     } else if (e.type === 'plan_change') {
       if (!DAYS.includes(d.day)) return;
-      const p = cleanPlan(d, d.day); d.title = p.title; d.exercises = p.exercises;
-      // Nur Änderungen an gemeinsamen Übungen lösen beim anderen eine Meldung aus
+      const p = cleanPlan(d, d.day); d.title = p.title; d.short = p.short; d.exercises = p.exercises;
       if (sharedDiff(s.plans[e.person][d.day], p).length) s.lastShared[e.person + '|' + d.day] = e;
       s.plans[e.person][d.day] = clone(p);
       p.exercises.forEach(x => { s.exInfo[x.id] = s.exInfo[x.id] || { name: x.name, type: x.type }; s.exInfo[x.id].name = x.name; });
@@ -197,6 +219,9 @@ function buildState() {
       s.swaps.push(e); s.feed.push(e);
     } else if (e.type === 'bodyweight') {
       const kg = num(d.kg); if (kg >= 30 && kg <= 300) s.bw[e.person].push({ ts: e.ts, kg });
+    } else if (e.type === 'avatar') {
+      if (d.img === '') delete s.avatars[e.person];
+      else if (typeof d.img === 'string' && d.img.length < 60000 && AVATAR_RE.test(d.img)) s.avatars[e.person] = d.img;
     }
   });
   s.feed.reverse();
@@ -207,7 +232,6 @@ function nextDay(p) { const l = st().last[p]; return l ? DAYS[(DAYS.indexOf(l.da
 function isPending(id) { return !seenIds.has(id) && pending.some(p => p.id === id); }
 
 /* ---------- Kennzahlen ---------- */
-// Arbeitsgewicht = schwerster Satz mit Wiederholungen (bei Körpergewicht: Zusatzgewicht, negativ = Unterstützung)
 function workW(sets) { const v = sets.filter(s => int(s.r) > 0).map(s => num(s.w)); return v.length ? Math.max(...v) : 0; }
 function score(type, sets) {
   if (type === 'time') return Math.max(0, ...sets.map(s => int(s.r)));
@@ -316,7 +340,7 @@ function fieldChanges(a, b, sharedOnly) {
   if (a.type !== b.type) c.push(`Art ${TYPE_LABEL[a.type]} → ${TYPE_LABEL[b.type]}`);
   if (a.sets !== b.sets) c.push(`Sätze ${a.sets} → ${b.sets}`);
   if (a.min !== b.min || a.max !== b.max) c.push(`${b.type === 'time' ? 'Sek.' : 'Wdh.'} ${a.min}–${a.max} → ${b.min}–${b.max}`);
-  if (!!a.warmup !== !!b.warmup) c.push(b.warmup ? 'Aufwärmsätze an' : 'Aufwärmsätze aus');
+  if (!!a.warmup !== !!b.warmup) c.push(b.warmup ? 'Aufwärmsatz an' : 'Aufwärmsatz aus');
   if (sharedOnly) return c;
   if (b.type !== 'time' && (a.step || 0) !== (b.step || 0)) c.push(`Steigerung ${fmtN(a.step || 0)} → ${fmtN(b.step || 0)} kg`);
   if ((a.cue || '') !== (b.cue || '')) c.push('Ausführung');
@@ -328,6 +352,7 @@ function fieldChanges(a, b, sharedOnly) {
 function diffPlan(from, to, sharedOnly) {
   const out = [];
   if ((from.title || '') !== (to.title || '')) out.push({ k: 'title', a: from.title, b: to.title });
+  if ((from.short || '') !== (to.short || '')) out.push({ k: 'short', a: from.short, b: to.short });
   const fm = new Map(from.exercises.map(x => [x.id, x])), tm = new Map(to.exercises.map(x => [x.id, x]));
   to.exercises.forEach(x => {
     if (!fm.has(x.id)) {
@@ -344,13 +369,11 @@ function diffPlan(from, to, sharedOnly) {
   if (common !== commonFrom) out.push({ k: 'order' });
   return out;
 }
-// Unterschied nur bei gemeinsamen Übungen: abweichende Übungen (bei mir oder beim anderen) zählen nie
 function sharedDiff(mine, theirs) {
   const ignore = new Set([...mine.exercises, ...theirs.exercises].filter(x => x.personal).map(x => x.id));
-  const f = p => ({ title: p.title, exercises: p.exercises.filter(x => !ignore.has(x.id)) });
+  const f = p => ({ title: p.title, short: p.short, exercises: p.exercises.filter(x => !ignore.has(x.id)) });
   return diffPlan(f(mine), f(theirs), true);
 }
-// Plan des anderen übernehmen: gemeinsame Übungen + Reihenfolge von ihm, persönliche Werte und abweichende Übungen von mir
 function mergePlan(mine, theirs) {
   const tShared = theirs.exercises.filter(x => !x.personal);
   const tSharedIds = new Set(tShared.map(x => x.id));
@@ -369,9 +392,9 @@ function mergePlan(mine, theirs) {
     for (let j = i - 1; j >= 0; j--) { const idx = result.findIndex(y => y.id === mine.exercises[j].id); if (idx >= 0) { pos = idx + 1; break; } }
     result.splice(pos, 0, clone(x));
   });
-  return { title: theirs.title, exercises: result };
+  return { title: theirs.title, short: theirs.short, exercises: result };
 }
-const DIFF_SIGN = { add: '+', remove: '−', replace: '⇄', edit: '~', order: '↕', title: '~' };
+const DIFF_SIGN = { add: '+', remove: '−', replace: '⇄', edit: '~', order: '↕', title: '~', short: '~' };
 function diffText(d) {
   switch (d.k) {
     case 'add': return `Neu: ${d.b}`;
@@ -380,10 +403,11 @@ function diffText(d) {
     case 'edit': return `${d.b}: ${(d.ch || []).join(', ')}`;
     case 'order': return 'Reihenfolge geändert';
     case 'title': return `Name des Tages: ${d.a} → ${d.b}`;
+    case 'short': return `Kürzel: ${d.a} → ${d.b}`;
   }
   return '';
 }
-const diffList = list => `<ul class="diff">${list.map(d => `<li class="${esc(d.k)}"><span class="s">${DIFF_SIGN[d.k] || '~'}</span><span>${esc(diffText(d))}</span></li>`).join('')}</ul>`;
+const diffList = list => `<ul class="diff">${list.map(d => `<li><span class="s">${DIFF_SIGN[d.k] || '~'}</span><span>${esc(diffText(d))}</span></li>`).join('')}</ul>`;
 
 function bellItems() {
   const s = st(), me = cfg.me, other = partner(), out = [];
@@ -421,8 +445,7 @@ const mini = {
   async error() {},
   hide() { setTimeout(() => { $('#topbar').hidden = true; this.set(0); }, 300); }
 };
-
-let syncing = null, syncError = null, rejectedCount = 0;
+let syncing = null, syncError = null;
 async function call(body) {
   const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 25000);
   try {
@@ -450,25 +473,24 @@ function addSynced(ev) {
   seenIds.add(ev.id);
   if (ev.seq > lastSeq) lastSeq = ev.seq;
 }
-
 function sync({ overlay = false, quiet = false } = {}) {
   if (!cfg.url || !cfg.key) return Promise.resolve({ ok: false, code: 'nocfg' });
   if (syncing) return syncing;
   const ui = overlay ? loader : mini;
   syncing = (async () => {
-    await Promise.resolve(); // erst nach der Zuweisung oben weiterlaufen
+    await Promise.resolve();
     ui.show();
     try {
       if (navigator.onLine === false) throw { code: 'offline' };
       const toPush = pending.filter(p => !seenIds.has(p.id));
-      const batches = []; for (let i = 0; i < toPush.length; i += 25) batches.push(toPush.slice(i, i + 25));
+      const batches = []; for (let i = 0; i < toPush.length; i += 10) batches.push(toPush.slice(i, i + 10));
       const pushShare = batches.length ? 0.4 : 0;
       let rejected = 0;
       ui.set(4, toPush.length ? `Sende ${toPush.length} ${toPush.length === 1 ? 'Eintrag' : 'Einträge'} …` : 'Prüfe auf Neuigkeiten …', '');
       for (let i = 0; i < batches.length; i++) {
         const r = await call({ action: 'push', events: batches[i].map(e => ({ id: e.id, ts: e.ts, person: e.person, type: e.type, summary: e.summary || '', data: e.data })) });
         rejected += r.rejected || 0;
-        ui.set(4 + 92 * pushShare * ((i + 1) / batches.length), null, `${Math.min((i + 1) * 25, toPush.length)} von ${toPush.length} gesendet`);
+        ui.set(4 + 92 * pushShare * ((i + 1) / batches.length), null, `${Math.min((i + 1) * 10, toPush.length)} von ${toPush.length} gesendet`);
       }
       const start = lastSeq; let guard = 0;
       while (guard++ < 400) {
@@ -480,7 +502,6 @@ function sync({ overlay = false, quiet = false } = {}) {
         if (!r.more || !(r.events || []).length) break;
       }
       pending = pending.filter(p => !seenIds.has(p.id));
-      rejectedCount = rejected ? pending.length : 0;
       saveLog();
       lastSync = new Date().toISOString(); LS.set('lastSync', lastSync); syncError = null;
       ui.set(100, 'Fertig', '');
@@ -501,8 +522,197 @@ function sync({ overlay = false, quiet = false } = {}) {
   return syncing;
 }
 
+/* ---------- Bilder verkleinern ---------- */
+function loadImage(file) {
+  return new Promise((res, rej) => { const url = URL.createObjectURL(file); const img = new Image(); img.onload = () => { URL.revokeObjectURL(url); res(img); }; img.onerror = () => { URL.revokeObjectURL(url); rej(new Error('Bild konnte nicht gelesen werden')); }; img.src = url; });
+}
+async function resizeImage(file, max, square) {
+  const img = await loadImage(file);
+  let w = img.naturalWidth, h = img.naturalHeight, sx = 0, sy = 0, sw = w, sh = h;
+  if (square) { const m = Math.min(w, h); sx = (w - m) / 2; sy = (h - m) / 2; sw = sh = m; w = h = Math.min(max, m); }
+  else { const f = Math.min(1, max / Math.max(w, h)); w = Math.round(w * f); h = Math.round(h * f); }
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  c.getContext('2d').drawImage(img, sx, sy, sw, sh, 0, 0, w, h);
+  return c;
+}
+const canvasBlob = (c, q) => new Promise(r => c.toBlob(r, 'image/jpeg', q));
+
+/* ---------- Vault: Bilder nur auf diesem Handy, verschlüsselt mit dem Code ---------- */
+const b64e = u8 => { let s = ''; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); };
+const b64d = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
+const VAULT = { picking: 0, key: null, mode: 'unlock', pin: '', first: '', msg: '', bad: false, entries: null, urls: {}, fails: 0, until: 0, del: null, importData: null, photo: null, photoUrl: null };
+const vmeta = () => LS.get('vault.' + cfg.me, null);
+const IDB = {
+  db: null,
+  open() {
+    if (this.db) return Promise.resolve(this.db);
+    return new Promise((res, rej) => {
+      const r = indexedDB.open('hb-vault', 1);
+      r.onupgradeneeded = () => { const s = r.result.createObjectStore('entries', { keyPath: 'id' }); s.createIndex('person', 'person'); };
+      r.onsuccess = () => { this.db = r.result; res(this.db); };
+      r.onerror = () => rej(r.error);
+    });
+  },
+  async tx(mode, fn) { const db = await this.open(); return new Promise((res, rej) => { const t = db.transaction('entries', mode); const s = t.objectStore('entries'); const out = fn(s); t.oncomplete = () => res(out && out.result !== undefined ? out.result : out); t.onerror = () => rej(t.error); }); },
+  all(person) { return this.tx('readonly', s => s.index('person').getAll(person)); },
+  put(rec) { return this.tx('readwrite', s => s.put(rec)); },
+  del(id) { return this.tx('readwrite', s => s.delete(id)); }
+};
+async function deriveKey(pin, saltB64) {
+  const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(pin), 'PBKDF2', false, ['deriveKey']);
+  return crypto.subtle.deriveKey({ name: 'PBKDF2', salt: b64d(saltB64), iterations: 250000, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+async function encBytes(key, bytes) { const iv = crypto.getRandomValues(new Uint8Array(12)); const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, bytes); return { iv: b64e(iv), ct: new Uint8Array(ct) }; }
+async function decBytes(key, iv, ct) { return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: b64d(iv) }, key, ct)); }
+const encJSON = (key, o) => encBytes(key, new TextEncoder().encode(JSON.stringify(o)));
+const decJSON = async (key, iv, ct) => JSON.parse(new TextDecoder().decode(await decBytes(key, iv, ct)));
+async function makeMeta(pin) {
+  const salt = b64e(crypto.getRandomValues(new Uint8Array(16)));
+  const key = await deriveKey(pin, salt);
+  const chk = await encJSON(key, { v: 'hantelbuch-vault' });
+  return { key, meta: { salt, civ: chk.iv, check: b64e(chk.ct) } };
+}
+async function tryKey(pin, meta) {
+  try { const key = await deriveKey(pin, meta.salt); const o = await decJSON(key, meta.civ, b64d(meta.check)); return o && o.v === 'hantelbuch-vault' ? key : null; } catch (e) { return null; }
+}
+async function loadVault() {
+  const recs = await IDB.all(cfg.me);
+  const list = [];
+  for (const r of recs) { try { const m = await decJSON(VAULT.key, r.miv, new Uint8Array(r.meta)); list.push({ ...m, id: r.id, created: r.created }); } catch (e) { /* falscher Schlüssel: überspringen */ } }
+  list.sort((a, b) => (b.date || '').localeCompare(a.date || '') || (b.created || '').localeCompare(a.created || ''));
+  VAULT.entries = list;
+}
+function lockVault() {
+  Object.values(VAULT.urls).forEach(u => URL.revokeObjectURL(u));
+  Object.assign(VAULT, { key: null, entries: null, urls: {}, pin: '', first: '', msg: '', mode: 'unlock', del: null, importData: null });
+  if (VAULT.photoUrl) URL.revokeObjectURL(VAULT.photoUrl);
+  VAULT.photo = null; VAULT.photoUrl = null;
+}
+async function fillVaultImages() {
+  if (!VAULT.key) return;
+  const imgs = document.querySelectorAll('img[data-vimg]');
+  for (const el of imgs) {
+    const id = el.dataset.vimg;
+    if (!VAULT.urls[id]) {
+      try {
+        const recs = await IDB.tx('readonly', s => s.get(id));
+        const bytes = await decBytes(VAULT.key, recs.iiv, new Uint8Array(recs.img));
+        VAULT.urls[id] = URL.createObjectURL(new Blob([bytes], { type: 'image/jpeg' }));
+      } catch (e) { continue; }
+    }
+    if (document.body.contains(el)) el.src = VAULT.urls[id];
+  }
+}
+async function pinComplete() {
+  const pin = VAULT.pin; VAULT.pin = '';
+  const fail = msg => { VAULT.msg = msg; VAULT.bad = true; render(); setTimeout(() => { VAULT.bad = false; }, 400); };
+  const meta = vmeta();
+  if (VAULT.mode === 'set1' || VAULT.mode === 'new1') { VAULT.first = pin; VAULT.mode = VAULT.mode === 'set1' ? 'set2' : 'new2'; VAULT.msg = ''; render(); return; }
+  if (VAULT.mode === 'set2') {
+    if (pin !== VAULT.first) { VAULT.mode = 'set1'; VAULT.first = ''; return fail('Die Codes stimmen nicht überein. Bitte noch einmal.'); }
+    VAULT.msg = 'Lege Vault an …'; render();
+    const { key, meta: m } = await makeMeta(pin);
+    LS.set('vault.' + cfg.me, m); VAULT.key = key; VAULT.entries = []; VAULT.mode = 'unlock'; VAULT.msg = '';
+    try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch (e) { /* optional */ }
+    toast('Vault angelegt'); render(); return;
+  }
+  if (VAULT.mode === 'new2') {
+    if (pin !== VAULT.first) { VAULT.mode = 'new1'; VAULT.first = ''; return fail('Die Codes stimmen nicht überein. Neuen Code noch einmal eingeben.'); }
+    VAULT.msg = 'Verschlüssele neu …'; render();
+    await rekeyVault(VAULT.key, pin);
+    VAULT.mode = 'unlock'; VAULT.msg = ''; toast('Vault-Code geändert'); location.hash = '#einstellungen'; return;
+  }
+  if (Date.now() < VAULT.until) return fail(`Zu viele Versuche. Bitte ${Math.ceil((VAULT.until - Date.now()) / 1000)} Sekunden warten.`);
+  if (VAULT.mode === 'import') {
+    const key = await tryKey(pin, VAULT.importData.meta);
+    if (!key) return fail('Falscher Code für dieses Backup.');
+    VAULT.msg = 'Lade Backup …'; render();
+    const n = await importBackup(VAULT.importData, key);
+    VAULT.importData = null; VAULT.mode = 'unlock'; VAULT.msg = ''; await loadVault(); toast(`${n} ${n === 1 ? 'Bild' : 'Bilder'} aus dem Backup geladen`); render(); return;
+  }
+  VAULT.msg = 'Prüfe Code …'; render();
+  const key = await tryKey(pin, meta);
+  if (!key) { VAULT.fails++; if (VAULT.fails >= 5) { VAULT.until = Date.now() + 30000; VAULT.fails = 0; } return fail('Falscher Code.'); }
+  VAULT.fails = 0; VAULT.msg = '';
+  if (VAULT.mode === 'old') { VAULT.key = key; VAULT.mode = 'new1'; render(); return; }
+  VAULT.key = key;
+  if (VAULT.importData) {
+    if (VAULT.importData.meta.salt === meta.salt) { VAULT.msg = 'Lade Backup …'; render(); const n = await importBackup(VAULT.importData, key); VAULT.importData = null; VAULT.msg = ''; toast(`${n} ${n === 1 ? 'Bild' : 'Bilder'} aus dem Backup geladen`); }
+    else { VAULT.mode = 'import'; render(); return; }
+  }
+  await loadVault(); render();
+}
+async function rekeyVault(oldKey, newPin) {
+  const { key, meta } = await makeMeta(newPin);
+  const recs = await IDB.all(cfg.me);
+  for (const r of recs) {
+    const m = await decBytes(oldKey, r.miv, new Uint8Array(r.meta));
+    const i = await decBytes(oldKey, r.iiv, new Uint8Array(r.img));
+    const em = await encBytes(key, m), ei = await encBytes(key, i);
+    await IDB.put({ ...r, miv: em.iv, meta: em.ct.buffer, iiv: ei.iv, img: ei.ct.buffer });
+  }
+  LS.set('vault.' + cfg.me, meta);
+  lockVault();
+}
+async function saveVaultEntry(form) {
+  const f = new FormData(form);
+  const err = m => { const e = $('#vn-err'); e.textContent = m; e.hidden = false; };
+  if (!VAULT.photo) return err('Bitte zuerst ein Foto aufnehmen oder auswählen.');
+  const date = String(f.get('date') || todayStr());
+  const bw = num(f.get('bw'));
+  const note = String(f.get('note') || '').trim().slice(0, 2000);
+  const btn = $('#vn-save'); btn.disabled = true; btn.textContent = 'Speichere …';
+  try {
+    const canvas = await resizeImage(VAULT.photo, 1600, false);
+    const blob = await canvasBlob(canvas, 0.85);
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    const em = await encJSON(VAULT.key, { date, note, bw: bw >= 30 && bw <= 300 ? bw : null });
+    const ei = await encBytes(VAULT.key, bytes);
+    await IDB.put({ id: uid(), person: cfg.me, created: new Date().toISOString(), miv: em.iv, meta: em.ct.buffer, iiv: ei.iv, img: ei.ct.buffer });
+    if (VAULT.photoUrl) URL.revokeObjectURL(VAULT.photoUrl);
+    VAULT.photo = null; VAULT.photoUrl = null;
+    await loadVault(); toast('Im Vault gespeichert'); location.hash = '#vault';
+  } catch (e) { btn.disabled = false; btn.textContent = 'Im Vault speichern'; err('Speichern fehlgeschlagen: ' + (e.message || e)); }
+}
+async function exportVault() {
+  const meta = vmeta(); if (!meta) return;
+  const recs = await IDB.all(cfg.me);
+  const data = { type: 'hantelbuch-vault', v: 1, person: cfg.me, created: new Date().toISOString(), meta, entries: recs.map(r => ({ id: r.id, created: r.created, miv: r.miv, meta: b64e(new Uint8Array(r.meta)), iiv: r.iiv, img: b64e(new Uint8Array(r.img)) })) };
+  const name = `hantelbuch-vault-${cfg.me.toLowerCase()}-${todayStr()}.json`;
+  const file = new File([JSON.stringify(data)], name, { type: 'application/json' });
+  try {
+    if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: 'Hantelbuch Vault-Backup' }); return; }
+  } catch (e) { if (e && e.name === 'AbortError') return; }
+  const a = document.createElement('a'); a.href = URL.createObjectURL(file); a.download = name; document.body.appendChild(a); a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+  toast(`Backup mit ${recs.length} ${recs.length === 1 ? 'Bild' : 'Bildern'} erstellt`);
+}
+async function importBackup(data, srcKey) {
+  const existing = new Set((await IDB.all(cfg.me)).map(r => r.id));
+  let n = 0;
+  for (const e of data.entries) {
+    if (existing.has(e.id)) continue;
+    const m = await decBytes(srcKey, e.miv, b64d(e.meta));
+    const i = await decBytes(srcKey, e.iiv, b64d(e.img));
+    const em = await encBytes(VAULT.key, m), ei = await encBytes(VAULT.key, i);
+    await IDB.put({ id: e.id, person: cfg.me, created: e.created, miv: em.iv, meta: em.ct.buffer, iiv: ei.iv, img: ei.ct.buffer });
+    n++;
+  }
+  return n;
+}
+async function readBackupFile(file) {
+  try {
+    const data = JSON.parse(await file.text());
+    if (!data || data.type !== 'hantelbuch-vault' || !data.meta || !Array.isArray(data.entries)) throw new Error();
+    if (!vmeta()) { LS.set('vault.' + cfg.me, data.meta); }
+    VAULT.importData = data;
+    if (!VAULT.key) { toast('Gib den Code ein, mit dem das Backup erstellt wurde.'); VAULT.mode = 'unlock'; location.hash = '#vault'; render(); return; }
+    VAULT.mode = 'import'; location.hash = '#vault'; render();
+  } catch (e) { toast('Diese Datei ist kein Hantelbuch-Backup.'); }
+}
+
 /* ---------- Oberfläche ---------- */
-let view = '', verlaufTab = 'aktiv', notesFilter = 'Alle', skipAsk = false, finishAsk = false, discardAsk = false, builder = null, resetAsk = false, pendingRender = false;
+let view = '', verlaufTab = 'aktiv', notesFilter = 'Alle', skipAsk = false, builder = null, resetAsk = false, pendingRender = false;
 const cal = { y: new Date().getFullYear(), m: new Date().getMonth(), sel: todayStr() };
 
 function toast(msg) {
@@ -513,51 +723,59 @@ function bellBtn(id = 'bell') {
   const n = openCount();
   return `<a class="iconbtn" id="${id}" href="#glocke" aria-label="Planänderungen${n ? ', ' + n + ' neu' : ''}">${ICON.bell}${n ? `<span class="badge">${n}</span>` : ''}</a>`;
 }
-function head(title) {
-  return `<header class="head" id="head"><div class="brand">${title}</div>${bellBtn()}<a class="iconbtn" href="#einstellungen" aria-label="Einstellungen">${ICON.gear}</a></header>`;
-}
+const gearBtn = () => `<a class="iconbtn" href="#einstellungen" aria-label="Einstellungen">${ICON.gear}</a>`;
+const backBtn = (to, label = 'Zurück') => `<a class="iconbtn" href="#${to}" aria-label="${label}">${ICON.left}</a>`;
+function head(title, big = true) { return `<header class="head" id="head"><div class="brand ${big ? 'big' : ''}">${title}</div>${bellBtn()}</header>`; }
+const subhead = (backTo = 'start', right = '') => `<header class="head" id="head">${backBtn(backTo)}<div class="brand"></div>${right}</header>`;
 function tabbar(active) {
   const t = (id, label, icon) => `<a href="#${id}" ${active === id ? 'aria-current="page"' : ''}>${icon}<span>${label}</span></a>`;
-  return `<nav class="tabbar">${t('start', 'Start', ICON.home)}${t('verlauf', 'Verlauf', ICON.chart)}${t('plan', 'Plan', ICON.list)}${t('notizen', 'Notizen', ICON.note)}</nav>`;
+  return `<nav class="tabbar glass" aria-label="Navigation">${t('start', 'Start', ICON.home)}${t('verlauf', 'Verlauf', ICON.chart)}${t('plan', 'Plan', ICON.list)}${t('notizen', 'Notizen', ICON.note)}${t('profil', 'Profil', avatar(cfg.me, 24))}</nav>`;
 }
-const subhead = (title, backTo = 'start') => `<header class="head" id="head"><a class="back" href="#${backTo}">${ICON.back} Zurück</a><div class="brand" style="text-align:right">${title}</div></header>`;
 
 function safeRender() {
   const a = document.activeElement;
   if (a && $('#app').contains(a) && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) { pendingRender = true; if (view === 'training') refreshTraining(); return; }
   if (view === 'training' && draft) { refreshTraining(); return; }
+  if (view.startsWith('vault')) return; // Vault nicht durch Sync neu zeichnen
   render();
 }
 document.addEventListener('focusout', () => setTimeout(() => {
   if (!pendingRender) return;
   const a = document.activeElement;
   if (a && $('#app').contains(a) && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) return;
-  pendingRender = false; if (view === 'training' && draft) refreshTraining(); else render();
+  pendingRender = false; if (view === 'training' && draft) refreshTraining(); else if (!view.startsWith('vault')) render();
 }, 50));
+
+function exerciseDay(id) { const p = st().plans[cfg.me]; return DAYS.find(d => p[d].exercises.some(x => x.id === id)) || null; }
 
 function render() {
   const app = $('#app');
-  if (!cfg.me) { app.innerHTML = viewSetup(); return; }
+  if (!cfg.me) { document.body.dataset.tone = ''; app.innerHTML = viewSetup(); return; }
   const h = decodeURIComponent(location.hash.slice(1)) || 'start';
   const [name, arg] = h.includes(':') ? [h.slice(0, h.indexOf(':')), h.slice(h.indexOf(':') + 1)] : [h, ''];
-  if (name !== view) { skipAsk = finishAsk = discardAsk = resetAsk = false; }
-  let html;
+  if (name !== view) { skipAsk = resetAsk = false; if (view.startsWith('vault') && !name.startsWith('vault')) lockVault(); }
+  let html, tone = '';
   switch (name) {
-    case 'training': if (!draft) { location.hash = '#start'; return; } html = viewTraining(); break;
+    case 'training': if (!draft) { location.hash = '#start'; return; } html = viewTraining(); tone = DAY_TONE[draft.day]; break;
     case 'verlauf': html = head('Verlauf') + `<main class="view">${viewVerlauf()}</main>` + tabbar('verlauf'); break;
     case 'plan': html = head('Plan') + `<main class="view">${viewPlan()}</main>` + tabbar('plan'); break;
     case 'notizen': html = head('Notizen') + `<main class="view">${viewNotes()}</main>` + tabbar('notizen'); break;
-    case 'glocke': html = subhead('Planänderungen', draft ? 'training' : 'start') + `<main class="view">${viewBell()}</main>` + (draft ? '' : tabbar('')); break;
-    case 'einstellungen': html = subhead('Einstellungen') + `<main class="view">${viewSettings()}</main>` + tabbar(''); break;
-    case 'gewicht': html = subhead('Körpergewicht') + `<main class="view">${viewBodyweight()}</main>` + tabbar(''); break;
-    case 'uebung': html = subhead('Übung', 'verlauf') + `<main class="view">${viewExercise(arg)}</main>` + tabbar('verlauf'); break;
-    case 'training-log': html = subhead('Training', 'verlauf') + `<main class="view">${viewWorkout(arg)}</main>` + tabbar('verlauf'); break;
-    default: html = head(`Hantelbuch<small>${esc(cfg.me)}</small>`) + `<main class="view">${viewStart()}</main>` + tabbar('start');
+    case 'glocke': html = subhead(draft ? 'training' : 'start') + `<main class="view">${viewBell()}</main>` + (draft ? '' : tabbar('')); break;
+    case 'einstellungen': html = subhead(draft ? 'training' : 'start') + `<main class="view">${viewSettings()}</main>` + tabbar(''); break;
+    case 'gewicht': html = subhead('profil') + `<main class="view">${viewBodyweight()}</main>` + tabbar('profil'); break;
+    case 'profil': html = (arg && arg !== cfg.me ? subhead('start') : `<header class="head" id="head"><div class="brand"></div>${gearBtn()}</header>`) + `<main class="view">${viewProfile(arg && PEOPLE.includes(arg) ? arg : cfg.me)}</main>` + tabbar(arg && arg !== cfg.me ? '' : 'profil'); break;
+    case 'vault': html = subhead('profil', VAULT.key && VAULT.mode === 'unlock' ? `<button class="btn small glass" data-act="v-lock" style="border-color:rgba(255,255,255,.3)">${ICON.lock.replace('width="22" height="22"', 'width="16" height="16"')} Sperren</button>` : '') + `<main class="view">${viewVault()}</main>`; break;
+    case 'vault-neu': if (!VAULT.key) { location.hash = '#vault'; return; } html = subhead('vault') + `<main class="view">${viewVaultNew()}</main>`; break;
+    case 'uebung': html = subhead('verlauf') + `<main class="view">${viewExercise(arg)}</main>` + tabbar('verlauf'); tone = DAY_TONE[exerciseDay(arg)] || ''; break;
+    case 'training-log': { html = subhead('verlauf') + `<main class="view">${viewWorkout(arg)}</main>` + tabbar('verlauf'); const w = st().workouts.find(x => x.id === arg); tone = w ? DAY_TONE[w.data.day] : ''; break; }
+    default: html = `<header class="head" id="head"><div class="brand">Hantelbuch</div>${bellBtn()}${gearBtn()}</header><main class="view">${viewStart()}</main>` + tabbar('start');
   }
+  document.body.dataset.tone = tone;
   app.innerHTML = html;
   if (name !== view) { window.scrollTo(0, 0); view = name; }
   pendingRender = false;
   onScroll();
+  if (name === 'vault') fillVaultImages();
 }
 function onScroll() { const h = $('#head'); if (h) h.classList.toggle('scrolled', window.scrollY > 4); }
 window.addEventListener('scroll', onScroll, { passive: true });
@@ -565,85 +783,87 @@ window.addEventListener('scroll', onScroll, { passive: true });
 /* ---------- Start ---------- */
 function syncLine() {
   const waiting = pending.filter(p => !seenIds.has(p.id)).length;
-  if (!cfg.url) return `<div class="syncline"><i class="dot off"></i><span>Ohne Sync – Einträge bleiben nur auf diesem Handy.</span><a class="linkbtn" href="#einstellungen">Einrichten</a></div>`;
+  if (!cfg.url) return `<div class="syncline"><i class="sdot off"></i><span>Ohne Sync – Einträge bleiben nur auf diesem Handy.</span><a class="linkbtn" href="#einstellungen">Einrichten</a></div>`;
   const old = scriptVersion != null && scriptVersion < SCRIPT_MIN;
   const txt = old ? 'Google-Skript bitte aktualisieren (siehe Anleitung)' :
     syncError && waiting ? `${waiting} ${waiting === 1 ? 'Eintrag wartet' : 'Einträge warten'} auf Sync` :
     waiting ? `${waiting} ${waiting === 1 ? 'Eintrag wird' : 'Einträge werden'} gesendet …` :
     lastSync ? `Synchronisiert ${relDay(lastSync)}, ${fmtTime(lastSync)}` : 'Noch nicht synchronisiert';
-  return `<div class="syncline"><i class="dot ${waiting || old ? 'wait' : ''}"></i><span>${txt}</span><button class="linkbtn" data-act="sync">${ICON.sync} Sync</button></div>`;
+  return `<div class="syncline"><i class="sdot ${waiting || old ? 'wait' : ''}"></i><span>${txt}</span><button class="linkbtn" data-act="sync">${ICON.sync} Sync</button></div>`;
 }
-
 function viewStart() {
   const s = st(), me = cfg.me, other = partner();
   const nd = nextDay(me), plan = s.plans[me][nd];
-  const dl = deloadState(me);
+  const dl_ = deloadState(me);
   const nSets = plan.exercises.reduce((a, x) => a + (+x.sets || 0), 0);
-  const lastDone = s.workouts.filter(w => w.person === me && w.data.day === nd).pop();
-  const lastAny = s.last[me];
-  const rot = DAYS.map(d => `<div class="rot ${d === nd && !draft ? 'next' : ''}"><b>${d}</b><span>${esc(s.plans[me][d].title)}</span></div>`).join('');
+  const lastDoneOf = d => s.workouts.filter(w => w.person === me && w.data.day === d).pop();
+  const lastDone = lastDoneOf(nd);
+  const wd = new Date().toLocaleDateString('de-DE', { weekday: 'long' });
+  const rot = DAYS.map(d => {
+    const isNext = d === (draft ? draft.day : nd);
+    const l = lastDoneOf(d);
+    const label = isNext ? (draft ? 'läuft' : 'als Nächstes') : l ? 'zuletzt ' + new Date(l.ts).toLocaleDateString('de-DE', { weekday: 'short' }) : '–';
+    return `<div class="rot glass t-${DAY_TONE[d]} ${isNext ? 'next' : ''}"><b><i class="dot t-${DAY_TONE[d]}"></i>${esc(dl(d))}</b><span>${label}</span></div>`;
+  }).join('');
   let main;
   if (draft) {
-    main = `<div class="eyebrow">Training läuft · Tag ${draft.day}${draft.deload ? ' · Deload' : ''}</div>
-      <h2 class="display">${esc(draft.title)}</h2>
-      <div class="muted">Begonnen ${relDay(draft.start)} um ${fmtTime(draft.start)}</div>
-      <a class="btn primary" href="#training">Training fortsetzen</a>`;
+    main = `<div class="eyebrow">Training läuft${draft.deload ? ' · Deload' : ''}</div>
+      <h1 class="kurz">${esc(dl(draft.day))}</h1><div class="title">${esc(draft.title)}</div>
+      <div class="mono muted small">begonnen ${relDay(draft.start)} um ${fmtTime(draft.start)}</div>
+      <div class="btnrow" style="padding-top:8px"><a class="btn primary" href="#training">Training fortsetzen</a></div>`;
   } else {
     const nextAfter = DAYS[(DAYS.indexOf(nd) + 1) % 3];
-    main = `<div class="eyebrow">${dl.active ? `Deload · Teil ${dl.part} von 3 · ` : 'Als Nächstes · '}Tag ${nd}</div>
-      <h2 class="display">${esc(plan.title)}</h2>
-      <div class="muted">${plan.exercises.length} Übungen · ${dl.active ? `${plan.exercises.reduce((a, x) => a + Math.ceil((+x.sets || 1) / 2), 0)} Sätze (halbiert)` : `${nSets} Sätze`}${lastDone ? ` · zuletzt ${relDay(lastDone.ts)}` : ''}</div>
-      ${dl.active ? `<div class="deload"><b>Deload-Woche</b><span>${esc(dl.reason)}. Gewicht −10 %, halbe Sätze, Wiederholungen am unteren Ende. Danach geht es mit deinen bisherigen Gewichten weiter.</span></div>` : ''}
-      <button class="btn primary" data-act="start">${dl.active ? 'Deload-Training starten' : 'Training starten'}</button>
-      ${dl.active ? '<button class="btn ghost" data-act="start-normal">Heute normal trainieren</button>' : ''}
-      ${skipAsk ? `<div class="confirm"><div><b>Tag ${nd} überspringen?</b><br><span class="small">Danach ist bei dir Tag ${nextAfter} dran. ${esc(gen(other))} Rotation bleibt unverändert.</span></div>
-        <div class="btnrow"><button class="btn small" data-act="skip-yes">Überspringen</button><button class="btn small ghost" data-act="skip-no">Abbrechen</button></div></div>`
-        : `<button class="btn ghost" data-act="skip-ask">Tag ${nd} überspringen</button>`}`;
+    main = `<div class="eyebrow">${dl_.active ? `Deload · Teil ${dl_.part} von 3` : `Als Nächstes · ${wd}`}</div>
+      <h1 class="kurz">${esc(dl(nd))}</h1><div class="title">${esc(plan.title)}</div>
+      <div class="mono muted small">${plan.exercises.length} Übungen · ${dl_.active ? `${plan.exercises.reduce((a, x) => a + Math.ceil((+x.sets || 1) / 2), 0)} Sätze (halbiert)` : `${nSets} Sätze`}${lastDone ? ` · zuletzt ${relDay(lastDone.ts)}` : ''}</div>
+      ${dl_.active ? `<div class="deload"><b>Deload-Woche</b><span class="muted">${esc(dl_.reason)}. Gewicht −10 %, halbe Sätze, Wiederholungen am unteren Ende. Danach geht es mit deinen bisherigen Gewichten weiter.</span></div>` : ''}
+      <div class="btnrow" style="padding-top:8px">
+        <button class="btn primary" data-act="start" style="flex:2 1 160px">${dl_.active ? 'Deload starten' : 'Training starten'}</button>
+        ${skipAsk ? '' : '<button class="btn" data-act="skip-ask" style="flex:1 1 120px">Überspringen</button>'}
+      </div>
+      ${dl_.active ? '<button class="btn ghost" data-act="start-normal">Heute normal trainieren</button>' : ''}
+      ${skipAsk ? `<div class="confirm"><div><b>${esc(dl(nd))} überspringen?</b><br><span class="small muted">Danach ist bei dir ${esc(dl(nextAfter))} dran. ${esc(gen(other))} Rotation bleibt unverändert.</span></div>
+        <div class="btnrow"><button class="btn small primary" data-act="skip-yes">Überspringen</button><button class="btn small ghost" data-act="skip-no">Abbrechen</button></div></div>` : ''}`;
   }
   const wk = weekStart();
   const weekCount = p => s.workouts.filter(w => w.person === p && new Date(w.ts) >= wk).length;
-  const ol = s.last[other];
+  const ol = s.last[other], ml = s.last[me];
   const install = !(navigator.standalone || matchMedia('(display-mode: standalone)').matches) && /iPhone|iPad/.test(navigator.userAgent)
-    ? `<div class="install"><span>Tipp: Tippe in Safari auf <b>Teilen</b> und dann <b>Zum Home-Bildschirm</b>. Dann läuft die App wie eine normale App und auch offline.</span></div>` : '';
+    ? `<div class="install glass">Tipp: Tippe in Safari auf <b>Teilen</b> und dann <b>Zum Home-Bildschirm</b>. Dann läuft die App wie eine normale App und auch offline.</div>` : '';
   const feed = s.feed.slice(0, 5);
-  const bw = s.bw[me], lb = bw[bw.length - 1], pb = bw[bw.length - 2];
   return `${install}
-    <section class="hero">${main}<div class="rotation" aria-label="Deine Rotation">${rot}</div></section>
+    <section class="hero">${main}</section>
+    <div class="rotation" aria-label="Deine Rotation">${rot}</div>
     ${syncLine()}
     <div class="duo">
-      <section class="card"><span class="who ${cls(me)}">Du</span><span class="big">${weekCount(me)}</span><span class="small muted">Trainings diese Woche${lastAny ? `<br>zuletzt ${relDay(lastAny.ts)}` : ''}</span></section>
-      <section class="card"><span class="who ${cls(other)}">${esc(other)}</span><span class="big">${weekCount(other)}</span><span class="small muted">Trainings diese Woche<br>${ol ? `${ol.kind === 'skip' ? 'übersprungen' : 'zuletzt'} ${relDay(ol.ts)} · als Nächstes Tag ${nextDay(other)}` : 'noch kein Eintrag'}</span></section>
+      <a class="card" href="#profil"><span class="who">${avatar(me, 28)}Du</span><span class="big">${weekCount(me)}<small> / 3</small></span><span class="small muted">diese Woche${ml ? ` · zuletzt ${relDay(ml.ts)}` : ''}</span></a>
+      <a class="card" href="#profil:${esc(other)}"><span class="who">${avatar(other, 28)}${esc(other)}</span><span class="big">${weekCount(other)}<small> / 3</small></span><span class="small muted">${ol ? `als Nächstes ${esc(dl(nextDay(other), other))}` : 'noch kein Eintrag'}</span></a>
     </div>
-    <section class="card bwcard">
-      <div class="rowbetween"><b>Körpergewicht</b><a class="linkbtn" href="#gewicht">Verlauf</a></div>
-      <div class="rowbetween"><span class="big mono">${lb ? fmtN(lb.kg) + ' kg' : '–'}</span><span class="small muted">${lb ? `${relDay(lb.ts)}${pb ? ` · ${lb.kg - pb.kg >= 0 ? '+' : '−'}${fmtN(Math.abs(lb.kg - pb.kg))} kg` : ''}` : 'Noch kein Eintrag'}</span></div>
-      <div class="bwin"><label class="field"><input id="bw-in" inputmode="decimal" autocomplete="off" placeholder="z. B. 82,4" aria-label="Körpergewicht in kg"><span>kg</span></label><button class="btn small" data-act="bw-save">Eintragen</button></div>
-    </section>
-    <div class="sec-title"><h2>Neuigkeiten</h2>${s.feed.length > 5 ? '<a href="#verlauf">Alle anzeigen</a>' : ''}</div>
-    <section class="card">${feed.length ? `<div class="feed">${feed.map(feedItem).join('')}</div>` : '<div class="empty">Hier erscheinen eure Trainings, Steigerungen und Skips.</div>'}</section>`;
+    <div class="sec-title"><h2>Neuigkeiten</h2>${s.feed.length > 5 ? '<a href="#verlauf">Alle</a>' : ''}</div>
+    <section class="card" style="padding:4px 16px">${feed.length ? `<div class="feed">${feed.map(feedItem).join('')}</div>` : '<div class="empty">Hier erscheinen eure Trainings, Steigerungen und Skips.</div>'}</section>`;
 }
-
 function feedItem(e) {
-  const d = e.data || {}, p = e.person;
+  const d = e.data || {}, p = e.person, me = p === cfg.me;
   const wait = isPending(e.id) ? '<span class="chip wait">noch nicht synchronisiert</span>' : '';
-  let t = '', m = fmtDate(e.ts) + ', ' + fmtTime(e.ts), extra = '', href = '';
+  let t = '', m = fmtDate(e.ts) + ' · ' + fmtTime(e.ts), extra = '', href = '';
+  const who = `<b>${me ? 'Du' : esc(p)}</b>`;
   if (e.type === 'workout') {
     const n = (d.entries || []).reduce((a, en) => a + en.sets.length, 0);
     const imp = improvements(e);
-    t = `<b>${esc(p)}</b> hat Tag ${d.day} · ${esc(d.title)} abgeschlossen`;
+    t = `${dayChip(d.day, p)}<span>${who} ${me ? 'hast' : 'hat'} abgeschlossen</span>`;
     m += ` · ${duration(d.start, d.end)} · ${n} ${n === 1 ? 'Satz' : 'Sätze'}`;
     const notes = (d.entries || []).filter(en => en.note).length;
     extra = (d.deload ? '<span class="chip dl">Deload</span>' : '')
-      + imp.map(i => `<span class="chip ${i.pr ? 'pr' : 'up'}">${esc(i.name.replace(/\s*\(.*\)$/, ''))} ${esc(i.label)}${i.pr ? ' · Rekord' : ''}</span>`).join('')
+      + imp.map(i => `<span class="chip ${i.pr ? 'pr' : ''}">${esc(i.name.replace(/\s*\(.*\)$/, ''))} ${esc(i.label)}${i.pr ? ' · Rekord' : ''}</span>`).join('')
       + (notes ? `<span class="chip">${notes} ${notes === 1 ? 'Notiz' : 'Notizen'}</span>` : '');
     href = '#training-log:' + encodeURIComponent(e.id);
   } else if (e.type === 'skip') {
-    t = `<b>${esc(p)}</b> hat Tag ${d.day} übersprungen`;
+    t = `${dayChip(d.day, p, 'skip')}<span>${who} ${me ? 'hast' : 'hat'} übersprungen</span>`;
   } else if (e.type === 'swap') {
-    t = `<b>${esc(p)}</b> hat heute ${esc(d.fromName)} durch ${esc(d.to.name)} getauscht`;
-    extra = `<span class="chip">Tag ${d.day} · für beide</span>`;
+    t = `${dayChip(d.day, p)}<span>${who} ${me ? 'hast' : 'hat'} heute ${esc(d.fromName)} durch ${esc(d.to.name)} getauscht</span>`;
+    extra = '<span class="chip">für beide</span>';
   }
-  const inner = `<div class="av ${cls(p)}">${esc(p[0])}</div><div><div class="t">${t}</div><div class="m">${m}</div>${extra || wait ? `<div class="chips">${extra}${wait}</div>` : ''}</div>`;
+  const inner = `${avatar(p, 34)}<div><div class="t">${t}</div><div class="m">${m}</div>${extra || wait ? `<div class="chips">${extra}${wait}</div>` : ''}</div>`;
   return href ? `<a class="fi" href="${href}">${inner}</a>` : `<div class="fi">${inner}</div>`;
 }
 
@@ -672,8 +892,8 @@ function partnerSwapsToday(day) {
 }
 function startTraining(skipDeload) {
   const me = cfg.me, day = nextDay(me), plan = st().plans[me][day];
-  const dl = deloadState(me), deload = dl.active && !skipDeload;
-  draft = { day, title: plan.title, start: new Date().toISOString(), deload, deloadSkipped: dl.active && !!skipDeload, swapIgnored: [], items: plan.exercises.map(x => newItem(clone(x), deload)) };
+  const dlS = deloadState(me), deload = dlS.active && !skipDeload;
+  draft = { day, title: plan.title, start: new Date().toISOString(), deload, deloadSkipped: dlS.active && !!skipDeload, swapIgnored: [], items: plan.exercises.map(x => newItem(clone(x), deload)) };
   partnerSwapsToday(day).forEach(sw => {
     const i = draft.items.findIndex(t => t.ex.id === sw.data.fromId);
     if (i < 0) return;
@@ -685,37 +905,28 @@ function startTraining(skipDeload) {
 }
 const hasEntries = it => it.sets.some(s => s.done || int(s.r) > 0) || !!(it.note || '').trim();
 const workCount = () => { let done = 0, tot = 0; draft.items.forEach(it => it.sets.forEach(s => { tot++; if (s.done) done++; })); return { done, tot }; };
-
+function trainCountText() { const { done, tot } = workCount(); return `${done} / ${tot} Sätze · ${duration(draft.start, new Date().toISOString())}`; }
 function viewTraining() {
   const { done, tot } = workCount();
   return `<header class="trainhead" id="head">
-      <div class="row"><a class="back" href="#start">${ICON.back} Start</a><span class="mono small muted" id="tp-count">${done}/${tot} Sätze</span>${bellBtn('tbell')}</div>
-      <div class="row"><h1 class="display">Tag ${draft.day} · ${esc(draft.title)}</h1>${draft.deload ? '<span class="pill dl">Deload</span>' : ''}</div>
+      <div class="row">${backBtn('start', 'Zurück zum Start')}<span class="count" id="tp-count">${trainCountText()}</span>${bellBtn('tbell')}</div>
+      <div class="ttl"><div><h1 class="kurz">${esc(dl(draft.day))}</h1><div class="sub">${esc(draft.title)}</div></div>${draft.deload ? '<span class="pill dl">Deload</span>' : ''}</div>
       <div class="bar"><i id="tp-bar" style="width:${tot ? done / tot * 100 : 0}%"></i></div>
     </header>
-    <main class="view notab">
-      ${draft.items.map((it, i) => exCard(it, i)).join('')}
-      <div class="finishbar">${finishAsk ? finishPanel() : `<button class="btn accent" data-act="finish-ask">Training abschließen</button>`}
-        ${discardAsk ? `<div class="confirm"><b>Training verwerfen?</b><span class="small">Alle Einträge dieses Trainings gehen verloren. Deine Rotation bleibt unverändert.</span>
-          <div class="btnrow"><button class="btn small danger" data-act="discard-yes">Verwerfen</button><button class="btn small ghost" data-act="discard-no">Abbrechen</button></div></div>`
-          : `<button class="btn ghost danger" data-act="discard-ask">Training verwerfen</button>`}</div>
-    </main>`;
+    <main class="view notab">${draft.items.map((it, i) => exCard(it, i)).join('')}</main>
+    <div class="trainbar"><button class="btn primary" data-act="finish-ask">Training abschließen</button><button class="btn x" data-act="discard-ask" aria-label="Training verwerfen">${ICON.x}</button></div>`;
 }
 function pendingSwapFor(it) {
   if (!draft || it.swappedFrom || it.removed) return null;
   return partnerSwapsToday(draft.day).find(sw => sw.data.fromId === it.ex.id && !draft.swapIgnored.includes(sw.id)) || null;
 }
-function warmupScheme(i) {
-  const it = draft.items[i];
-  if (!it.ex.warmup || it.ex.type !== 'kg' || it.removed) return [];
-  const first = draft.items.findIndex(t => t.ex.warmup && t.ex.type === 'kg' && !t.removed);
-  return i === first ? [[0.4, 10], [0.6, 5], [0.8, 3]] : [[0.6, 5]];
-}
-function warmupLabel(it, p, reps, k) {
+const hasWarmup = it => it.ex.warmup && it.ex.type === 'kg' && !it.removed;
+function warmupLabel(it) {
   const W = num(it.sets[0] && it.sets[0].w) || workW(it.sets.map(s => ({ w: s.w, r: 1 })));
-  if (!(W > 0)) return k === 0 ? `Leere Stange × ${reps}` : `${Math.round(p * 100)} % × ${reps}`;
-  const kg = Math.max(W >= 20 ? 20 : 0, roundTo(W * p, 2.5));
-  return `${fmtN(Math.min(kg, W))} kg × ${reps}`;
+  const [p, reps] = WARMUP;
+  if (!(W > 0)) return `Aufwärmen · ${Math.round(p * 100)} % × ${reps}`;
+  const kg = Math.min(W, Math.max(W >= 20 ? 20 : 0, roundTo(W * p, 2.5)));
+  return `Aufwärmen · ${fmtN(kg)} kg × ${reps}`;
 }
 function exCard(it, i) {
   const x = it.ex, me = cfg.me, other = partner();
@@ -725,7 +936,6 @@ function exCard(it, i) {
   const allDone = it.sets.length && it.sets.every(s => s.done);
   const hint = draft.deload ? 'Deload: Gewicht −10 %, halbe Sätze, Wiederholungen am unteren Ende.' : pr.hint;
   const sw = pendingSwapFor(it);
-  const scheme = warmupScheme(i);
   const lastReps = j => (draft.deload ? x.min : mine && mine.type === x.type && mine.sets[j] ? mine.sets[j].r : x.max);
   const wField = (s, j) => x.type === 'kg'
     ? `<label class="field"><input id="w-${i}-${j}" data-i="${i}" data-j="${j}" data-f="w" inputmode="decimal" autocomplete="off" aria-label="Gewicht Satz ${j + 1}" value="${esc(s.w)}" placeholder="–"><span>kg</span></label>`
@@ -736,27 +946,25 @@ function exCard(it, i) {
       <label class="field"><input id="r-${i}-${j}" data-i="${i}" data-j="${j}" data-f="r" inputmode="numeric" autocomplete="off" aria-label="${x.type === 'time' ? 'Sekunden' : 'Wiederholungen'} Satz ${j + 1}" value="${esc(s.r)}" placeholder="${lastReps(j)}"><span>${x.type === 'time' ? 's' : '×'}</span></label>
       <button class="check" data-act="check" data-i="${i}" data-j="${j}" aria-label="Satz ${j + 1} erledigt" aria-pressed="${s.done}">${ICON.check}</button>
     </div>`).join('');
-  const cols = x.type === 'time' ? `<div class="cols"><span>Satz</span><span class="r">Sekunden</span><span></span></div>`
-    : `<div class="cols"><span>Satz</span><span class="r">${x.type === 'bw' ? '± kg' : 'kg'}</span><span class="r">Wdh.</span><span></span></div>`;
-  const warm = scheme.length ? `<div class="wsets"><div class="cols"><span></span><span>Aufwärmen</span><span></span></div>${scheme.map(([p, reps], k) => `<div class="wset ${it.wu[k] ? 'ok' : ''}"><span class="n">W</span><span class="wv" id="wu-${i}-${k}">${warmupLabel(it, p, reps, k)}</span><button class="check small" data-act="wu" data-i="${i}" data-k="${k}" aria-label="Aufwärmsatz ${k + 1} erledigt" aria-pressed="${!!it.wu[k]}">${ICON.check}</button></div>`).join('')}</div>` : '';
-  return `<article class="ex ${allDone ? 'done' : ''} ${it.removed ? 'gone' : ''}" data-card="${i}" data-swaphint="${sw ? esc(sw.id) : ''}">
+  const cols = x.type === 'time' ? `<div class="cols"><span></span><span class="r">Sekunden</span><span></span></div>`
+    : `<div class="cols"><span></span><span class="r">${x.type === 'bw' ? '± kg' : 'kg'}</span><span class="r">Wdh.</span><span></span></div>`;
+  const warm = hasWarmup(it) ? `<div class="wsets"><div class="wset ${it.wu[0] ? 'ok' : ''}"><span class="n">W</span><span class="wv" id="wu-${i}">${warmupLabel(it)}</span><button class="check" data-act="wu" data-i="${i}" aria-label="Aufwärmsatz erledigt" aria-pressed="${!!it.wu[0]}">${ICON.check}</button></div></div>` : '';
+  return `<article class="ex glass ${allDone ? 'done' : ''} ${it.removed ? 'gone' : ''}" data-card="${i}" data-swaphint="${sw ? esc(sw.id) : ''}">
     <div class="ex-head"><div class="nm"><h3>${esc(x.name)}</h3>
-      ${it.swappedFrom ? `<span class="tag">Heute statt ${esc(it.swappedFrom.name)}${it.swapBy && it.swapBy !== me ? ` · von ${esc(it.swapBy)}` : ''}</span>` : ''}
-      ${it.removed ? '<span class="tag warn">Nicht mehr im Plan</span>' : ''}${x.personal ? '<span class="tag">Nur ich</span>' : ''}</div>
+      ${it.swappedFrom || it.removed || x.personal ? `<div class="tags">${it.swappedFrom ? `<span class="tag">Heute statt ${esc(it.swappedFrom.name)}${it.swapBy && it.swapBy !== me ? ` · von ${esc(it.swapBy)}` : ''}</span>` : ''}${it.removed ? '<span class="tag warn">Nicht mehr im Plan</span>' : ''}${x.personal ? '<span class="tag">Nur ich</span>' : ''}</div>` : ''}</div>
       <span class="tgt">${it.sets.length}×${x.min}–${x.max}${unit}</span></div>
-    ${sw ? `<div class="swaphint"><span><b>${esc(sw.person)}</b> hat heute ${esc(sw.data.fromName)} durch <b>${esc(sw.data.to.name)}</b> getauscht.</span><div class="btnrow"><button class="btn small accent" data-act="swap-follow" data-i="${i}" data-id="${esc(sw.id)}">Auch tauschen</button><button class="btn small ghost" data-act="swap-ignore" data-id="${esc(sw.id)}">Nein</button></div></div>` : ''}
-    <div class="lastline"><span class="who ${cls(me)}">Du</span><span class="v">${mine && mine.type === x.type ? fmtSets(x.type, mine.sets) : 'noch kein Eintrag'}</span>${mine ? `<span>${relDay(mine.ts)}${mine.deload ? ' · Deload' : ''}</span>` : ''}</div>
-    ${theirs ? `<div class="lastline"><span class="who ${cls(other)}">${esc(other)}</span><span class="v">${fmtSets(theirs.type, theirs.sets)}</span><span>${relDay(theirs.ts)}</span></div>` : ''}
-    ${hint ? `<div class="hint ${draft.deload ? 'dlhint' : pr.kind === 'down' || pr.kind === 'plateau' ? 'warnhint' : ''}">${esc(hint)}${pr.kind === 'plateau' && !draft.deload ? `<div class="btnrow" style="margin-top:8px"><button class="btn small" data-act="plateau-down" data-i="${i}">Heute −10 %</button></div><span class="small">Oder im Plan die Spanne anheben, z. B. ${x.min}–${x.max} → ${x.min + 2}–${x.max + 2}.</span>` : ''}</div>` : ''}
-    ${mine && mine.note ? `<div class="quote ${cls(me)} small">Deine Notiz vom letzten Mal: ${esc(mine.note)}</div>` : ''}
+    ${sw ? `<div class="swaphint"><span><b>${esc(sw.person)}</b> hat heute ${esc(sw.data.fromName)} durch <b>${esc(sw.data.to.name)}</b> getauscht.</span><div class="btnrow"><button class="btn small primary" data-act="swap-follow" data-i="${i}" data-id="${esc(sw.id)}">Auch tauschen</button><button class="btn small ghost" data-act="swap-ignore" data-id="${esc(sw.id)}">Nein</button></div></div>` : ''}
+    <div class="lastline"><span class="who">Du</span><span class="v">${mine && mine.type === x.type ? fmtSets(x.type, mine.sets) : 'noch kein Eintrag'}</span>${mine ? `<span class="r">${relDay(mine.ts)}${mine.deload ? ' · Deload' : ''}</span>` : ''}</div>
+    ${theirs ? `<div class="lastline other"><span class="who">${esc(other)}</span><span class="v">${fmtSets(theirs.type, theirs.sets)}</span><span class="r">${relDay(theirs.ts)}</span></div>` : ''}
+    ${hint ? `<div class="hint ${draft.deload ? 'dlhint' : pr.kind === 'down' || pr.kind === 'plateau' ? 'warnhint' : ''}">${esc(hint)}${pr.kind === 'plateau' && !draft.deload ? `<div class="btnrow"><button class="btn small" data-act="plateau-down" data-i="${i}">Heute −10 %</button></div><span class="small">Oder im Plan die Spanne anheben, z. B. ${x.min}–${x.max} → ${x.min + 2}–${x.max + 2}.</span>` : ''}</div>` : ''}
+    ${mine && mine.note ? `<div class="small muted">Deine Notiz vom letzten Mal: ${esc(mine.note)}</div>` : ''}
     <details class="how"><summary>Ausführung & Video</summary><div class="body">
       ${x.cue ? `<p>${esc(x.cue)}</p>` : ''}
       ${x.image ? `<img src="${esc(x.image)}" alt="${esc(x.name)}" loading="lazy">` : ''}
       <a class="vlink" href="${esc(videoUrl(x))}" target="_blank" rel="noopener">▶ ${x.video ? 'Video ansehen' : 'Videos auf YouTube suchen'}</a>
     </div></details>
-    ${warm}
-    <div class="sets ${x.type}">${cols}${rows}</div>
-    <div class="cardacts"><button class="addset" data-act="addset" data-i="${i}">+ Satz</button>${it.removed ? '' : `<button class="addset" data-act="swap-open" data-i="${i}">${ICON.swap} Heute tauschen</button>`}</div>
+    <div class="sets ${x.type}">${cols}${warm}${rows}</div>
+    <div class="cardacts"><button class="addset" data-act="addset" data-i="${i}">+ Satz</button><button class="addset" data-act="delset" data-i="${i}" ${it.sets.length <= 1 ? 'disabled' : ''}>− Satz</button><span class="sp"></span>${it.removed ? '' : `<button class="addset" data-act="swap-open" data-i="${i}">${ICON.swap} Heute tauschen</button>`}</div>
     ${allDone ? `<div class="feel" role="group" aria-label="Wie war die Übung?"><span>Wie war's?</span>${Object.entries(FEEL).map(([k, v]) => `<button data-act="feel" data-i="${i}" data-v="${k}" aria-pressed="${it.feel === k}">${v}</button>`).join('')}</div>` : ''}
     <label class="note"><span>Notiz</span><textarea id="note-${i}" data-note="${i}" rows="2" placeholder="z. B. Schulter zwickt, nächstes Mal enger greifen">${esc(it.note)}</textarea></label>
   </article>`;
@@ -769,7 +977,7 @@ function rerenderCard(i) {
 function updateTrainHead() {
   const { done, tot } = workCount();
   const c = $('#tp-count'), b = $('#tp-bar'), bell = $('#tbell');
-  if (c) c.textContent = `${done}/${tot} Sätze`;
+  if (c) c.textContent = trainCountText();
   if (b) b.style.width = (tot ? done / tot * 100 : 0) + '%';
   if (bell) bell.outerHTML = bellBtn('tbell');
 }
@@ -782,10 +990,6 @@ function refreshTraining() {
   });
   updateTrainHead();
 }
-function updateWarmups(i) {
-  const it = draft.items[i];
-  warmupScheme(i).forEach(([p, reps], k) => { const el = document.getElementById(`wu-${i}-${k}`); if (el) el.textContent = warmupLabel(it, p, reps, k); });
-}
 function collectEntries() {
   return draft.items.map(it => {
     const x = it.ex;
@@ -797,18 +1001,21 @@ function collectEntries() {
     return { exId: x.id, name: x.name, type: x.type, sets, note: (it.note || '').trim(), feel: it.feel || '' };
   }).filter(en => en.sets.length || en.note);
 }
-function finishPanel() {
+function sheet(inner) { $('#modal').innerHTML = `<div class="backdrop" data-act="mclose-bg"><div class="sheet" role="dialog" aria-modal="true">${inner}</div></div>`; }
+function finishSheet() {
   const entries = collectEntries();
   const sets = entries.reduce((a, en) => a + en.sets.length, 0);
   const vol = entries.filter(en => en.type === 'kg').reduce((a, en) => a + en.sets.reduce((b, s) => b + s.w * s.r, 0), 0);
   const empty = draft.items.filter(it => !it.removed && !entries.some(en => en.exId === it.ex.id)).map(it => it.ex.name);
-  return `<div class="card">
-    <b>Training abschließen?</b>
+  sheet(`<h2>Training abschließen?</h2>
     <dl class="kv"><dt>Sätze</dt><dd>${sets}</dd><dt>Volumen</dt><dd>${fmtN(Math.round(vol))} kg</dd><dt>Dauer</dt><dd>${duration(draft.start, new Date().toISOString())}</dd></dl>
     ${empty.length ? `<div class="small muted">Ohne Eintrag: ${esc(empty.join(', '))}</div>` : ''}
     ${sets ? '' : '<div class="err">Trage mindestens einen Satz ein.</div>'}
-    <div class="btnrow"><button class="btn accent" data-act="finish-yes" ${sets ? '' : 'disabled'}>Speichern</button><button class="btn ghost" data-act="finish-no">Weiter trainieren</button></div>
-  </div>`;
+    <div class="btnrow"><button class="btn primary" data-act="finish-yes" ${sets ? '' : 'disabled'}>Speichern</button><button class="btn ghost" data-act="mclose">Weiter trainieren</button></div>`);
+}
+function discardSheet() {
+  sheet(`<h2>Training verwerfen?</h2><p class="muted" style="margin:0">Alle Einträge dieses Trainings gehen verloren. Deine Rotation bleibt unverändert.</p>
+    <div class="btnrow"><button class="btn danger" data-act="discard-yes">Verwerfen</button><button class="btn ghost" data-act="mclose">Abbrechen</button></div>`);
 }
 function finishTraining() {
   const entries = collectEntries();
@@ -816,14 +1023,13 @@ function finishTraining() {
   const end = new Date().toISOString();
   const n = entries.reduce((a, en) => a + en.sets.length, 0);
   const swaps = draft.items.filter(it => it.swappedFrom).map(it => ({ fromId: it.swappedFrom.id, fromName: it.swappedFrom.name, toId: it.ex.id, toName: it.ex.name }));
-  const summary = `Tag ${draft.day} ${draft.title}${draft.deload ? ' (Deload)' : ''} · ${n} Sätze · ` + entries.map(en => `${en.name}: ${fmtSets(en.type, en.sets)}${en.feel ? ` [${FEEL[en.feel]}]` : ''}${en.note ? ` (Notiz: ${en.note})` : ''}`).join(' | ');
+  const summary = `${dl(draft.day)} ${draft.title}${draft.deload ? ' (Deload)' : ''} · ${n} Sätze · ` + entries.map(en => `${en.name}: ${fmtSets(en.type, en.sets)}${en.feel ? ` [${FEEL[en.feel]}]` : ''}${en.note ? ` (Notiz: ${en.note})` : ''}`).join(' | ');
   const e = addEvent('workout', { day: draft.day, title: draft.title, start: draft.start, end, deload: !!draft.deload, deloadSkipped: !!draft.deloadSkipped, swaps, entries }, summary);
-  draft = null; saveDraft(); finishAsk = false;
+  draft = null; saveDraft(); $('#modal').innerHTML = '';
   const imp = improvements(e);
   toast(imp.length ? `Training gespeichert · ${imp.length} ${imp.length === 1 ? 'Steigerung' : 'Steigerungen'}` : 'Training gespeichert');
   location.hash = '#start';
 }
-// Geänderten Plan ins laufende Training übernehmen, ohne Eingaben zu verlieren
 function applyToDraft(plan) {
   const old = draft.items, used = new Set(), res = [];
   plan.exercises.forEach(x => {
@@ -861,7 +1067,7 @@ function swapForm(i) {
     <label>Art<select id="sw-type" name="type">${Object.entries(TYPE_LABEL).map(([k, v]) => `<option value="${k}" ${x.type === k ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
     <div class="grid3"><label>Sätze<input class="inp" id="sw-sets" name="sets" inputmode="numeric" value="${x.sets}"></label><label>von<input class="inp" id="sw-min" name="min" inputmode="numeric" value="${x.min}"></label><label>bis<input class="inp" id="sw-max" name="max" inputmode="numeric" value="${x.max}"></label></div>
     <fieldset class="radios"><legend>Für wen?</legend>
-      <label class="chk"><input type="radio" name="who" value="both" checked><span>Für uns beide heute<small>${esc(partner())} sieht den Tausch in seinem heutigen Training für Tag ${draft.day}.</small></span></label>
+      <label class="chk"><input type="radio" name="who" value="both" checked><span>Für uns beide heute<small>${esc(partner())} sieht den Tausch in seinem heutigen Training für ${esc(dl(draft.day))}.</small></span></label>
       <label class="chk"><input type="radio" name="who" value="me"><span>Nur für mich</span></label>
     </fieldset>
     <div class="err" id="sw-err" hidden></div>
@@ -874,7 +1080,7 @@ function doSwap(i, x, from, by, shared) {
   const ni = newItem(x, draft.deload); ni.swappedFrom = from; ni.swapBy = by;
   if (hasEntries(it)) draft.items.splice(i + 1, 0, ni); else draft.items.splice(i, 1, ni);
   saveDraft();
-  if (shared) addEvent('swap', { day: draft.day, date: todayStr(), fromId: from.id, fromName: from.name, to: x }, `Tag ${draft.day}: ${from.name} heute durch ${x.name} ersetzt (für beide)`);
+  if (shared) addEvent('swap', { day: draft.day, date: todayStr(), fromId: from.id, fromName: from.name, to: x }, `${dl(draft.day)}: ${from.name} heute durch ${x.name} ersetzt (für beide)`);
 }
 function submitSwap(form) {
   const f = new FormData(form), i = +form.dataset.i, it = draft.items[i];
@@ -899,21 +1105,20 @@ function submitSwap(form) {
 function viewVerlauf() {
   const seg = `<div class="seg" role="group" aria-label="Ansicht">${[['aktiv', 'Aktivität'], ['uebungen', 'Übungen'], ['kalender', 'Kalender']].map(([k, v]) => `<button data-act="vtab" data-v="${k}" aria-pressed="${verlaufTab === k}">${v}</button>`).join('')}</div>`;
   const s = st(), me = cfg.me, other = partner();
-  if (verlaufTab === 'aktiv') return seg + `<section class="card">${s.feed.length ? `<div class="feed">${s.feed.map(feedItem).join('')}</div>` : '<div class="empty">Noch keine Einträge. Starte dein erstes Training auf der Startseite.</div>'}</section>`;
+  if (verlaufTab === 'aktiv') return seg + `<section class="card" style="padding:4px 16px">${s.feed.length ? `<div class="feed">${s.feed.map(feedItem).join('')}</div>` : '<div class="empty">Noch keine Einträge. Starte dein erstes Training auf der Startseite.</div>'}</section>`;
   if (verlaufTab === 'kalender') return seg + viewCalendar();
   const inPlan = new Set();
   const row = x => {
     inPlan.add(x.id);
     const a = lastAny(me, x.id), b = lastAny(other, x.id);
     return `<a class="exrow" href="#uebung:${encodeURIComponent(x.id)}"><div class="n"><b>${esc(x.name)}</b><span class="small muted">${TYPE_LABEL[x.type]}${x.personal ? ' · nur ich' : ''}</span></div>
-      <div class="vals"><span class="m">${a ? metricLabel(a.type, a.sets) : '–'}</span><span class="r">${b ? metricLabel(b.type, b.sets) : '–'}</span></div><span class="chev">›</span></a>`;
+      <div class="vals"><span>${a ? metricLabel(a.type, a.sets) : '–'}</span><span class="r">${b ? metricLabel(b.type, b.sets) : '–'}</span></div><span class="chev">›</span></a>`;
   };
-  const days = DAYS.map(d => `<div class="sec-title"><h2>Tag ${d} · ${esc(s.plans[me][d].title)}</h2></div><section class="card">${s.plans[me][d].exercises.map(row).join('') || '<div class="empty">Keine Übungen</div>'}</section>`).join('');
+  const days = DAYS.map(d => `<div class="sec-title"><h2 style="display:flex;gap:8px;align-items:center">${dayChip(d)} ${esc(s.plans[me][d].title)}</h2></div><section class="card" style="padding:4px 16px">${s.plans[me][d].exercises.map(row).join('') || '<div class="empty">Keine Übungen</div>'}</section>`).join('');
   const archived = Object.keys(s.exInfo).filter(id => !inPlan.has(id) && (s.hist[me][id] || s.hist[other][id]));
-  const legend = `<div class="legend small"><span class="who ${cls(me)}">Du</span><span class="who ${cls(other)}">${esc(other)}</span><span class="muted">letzte Einheit</span></div>`;
-  return seg + legend + days + (archived.length ? `<div class="sec-title"><h2>Archiv</h2></div><div class="small muted" style="margin:0 2px">Ausgetauschte, entfernte oder spontan getauschte Übungen. Ihr Verlauf bleibt erhalten.</div><section class="card">${archived.map(id => row({ id, ...s.exInfo[id] })).join('')}</section>` : '');
+  const legend = `<div class="legend"><span>oben: du</span><span>unten: ${esc(other)}</span><span>· letzte Einheit</span></div>`;
+  return seg + legend + days + (archived.length ? `<div class="sec-title"><h2>Archiv</h2></div><div class="small muted" style="margin:0 2px">Ausgetauschte, entfernte oder spontan getauschte Übungen. Ihr Verlauf bleibt erhalten.</div><section class="card" style="padding:4px 16px">${archived.map(id => row({ id, ...s.exInfo[id] })).join('')}</section>` : '');
 }
-
 function viewCalendar() {
   const s = st(), first = new Date(cal.y, cal.m, 1), offset = (first.getDay() + 6) % 7, daysIn = new Date(cal.y, cal.m + 1, 0).getDate();
   const map = {}; const add = (k, o) => (map[k] = map[k] || []).push(o);
@@ -925,22 +1130,21 @@ function viewCalendar() {
   for (let d = 1; d <= daysIn; d++) {
     const k = `${cal.y}-${pad2(cal.m + 1)}-${pad2(d)}`;
     const items = (map[k] || []).sort((a, b) => PEOPLE.indexOf(a.p) - PEOPLE.indexOf(b.p));
-    cells += `<button class="cd ${k === today ? 'today' : ''} ${k === cal.sel ? 'sel' : ''}" data-act="calday" data-v="${k}" aria-label="${d}. ${items.length ? items.length + ' Einträge' : 'kein Eintrag'}"><span class="dn">${d}</span><span class="marks">${items.map(o => `<i class="cm ${cls(o.p)} ${o.kind}">${o.day}</i>`).join('')}</span></button>`;
+    cells += `<button class="cd ${k === today ? 'today' : ''} ${k === cal.sel ? 'sel' : ''}" data-act="calday" data-v="${k}" aria-label="${d}. ${items.length ? items.length + ' Einträge' : 'kein Eintrag'}"><span class="dn">${d}</span><span class="marks">${items.map(o => `<i class="cm t-${DAY_TONE[o.day]} ${o.kind}" title="${esc(o.p)} · ${esc(dl(o.day, o.p))}">${esc(o.p[0])}</i>`).join('')}</span></button>`;
   }
   const sel = (map[cal.sel] || []).map(o => o.e).sort((a, b) => b.ts.localeCompare(a.ts));
   const title = first.toLocaleDateString('de-DE', { month: 'long', year: 'numeric' });
   return `<section class="card cal">
-      <div class="calnav"><button class="tool" data-act="calmove" data-v="-1" aria-label="Voriger Monat">${ICON.left}</button><b>${title}</b><button class="tool" data-act="calmove" data-v="1" aria-label="Nächster Monat">${ICON.right}</button></div>
+      <div class="calnav"><button class="iconbtn" data-act="calmove" data-v="-1" aria-label="Voriger Monat">${ICON.left}</button><b>${title}</b><button class="iconbtn" data-act="calmove" data-v="1" aria-label="Nächster Monat">${ICON.right}</button></div>
       <div class="calgrid">${['Mo', 'Di', 'Mi', 'Do', 'Fr', 'Sa', 'So'].map(w => `<span class="wd">${w}</span>`).join('')}${cells}</div>
-      <div class="legend small"><span><i class="cm manu workout">A</i> Manu</span><span><i class="cm rob workout">A</i> Rob</span><span><i class="cm manu skip">A</i> übersprungen</span><span><i class="cm manu deload">A</i> Deload</span></div>
+      <div class="legend">${DAYS.map(d => `<span class="ln"><i class="cm t-${DAY_TONE[d]}">M</i>${esc(dl(d))}</span>`).join('')}<span class="ln"><i class="cm t-y skip">R</i>übersprungen</span><span class="ln"><i class="cm t-y deload">M</i>Deload</span></div>
     </section>
     <div class="sec-title"><h2>${new Date(cal.sel + 'T12:00').toLocaleDateString('de-DE', { weekday: 'long', day: 'numeric', month: 'long' })}</h2></div>
-    <section class="card">${sel.length ? `<div class="feed">${sel.map(feedItem).join('')}</div>` : '<div class="empty">An diesem Tag hat niemand trainiert.</div>'}</section>`;
+    <section class="card" style="padding:4px 16px">${sel.length ? `<div class="feed">${sel.map(feedItem).join('')}</div>` : '<div class="empty">An diesem Tag hat niemand trainiert.</div>'}</section>`;
 }
-
 function chartSvg(series, label) {
   const pts = series.flatMap(sr => sr.points);
-  if (!pts.length) return '<div class="empty">Noch keine Daten für diese Übung.</div>';
+  if (!pts.length) return '<div class="empty">Noch keine Daten.</div>';
   const W = 340, H = 170, L = 38, R = 14, T = 16, B = 26;
   const t0 = Math.min(...pts.map(p => p.t)), t1 = Math.max(...pts.map(p => p.t));
   let v0 = Math.min(...pts.map(p => p.v)), v1 = Math.max(...pts.map(p => p.v));
@@ -955,72 +1159,156 @@ function chartSvg(series, label) {
   let g = '';
   for (let k = 0; k <= ticks; k++) {
     const v = v0 + stepV * k;
-    g += `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}" stroke="var(--line)" stroke-width="1"/><text x="${L - 6}" y="${Y(v) + 3}" text-anchor="end">${fmtN(v)}</text>`;
+    g += `<line x1="${L}" x2="${W - R}" y1="${Y(v)}" y2="${Y(v)}" stroke="rgba(255,255,255,.14)" stroke-width="1"/><text x="${L - 6}" y="${Y(v) + 3}" text-anchor="end">${fmtN(v)}</text>`;
   }
-  const dl = t => new Date(t).toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' });
-  g += `<text x="${L}" y="${H - 6}">${dl(t0)}</text>${t1 !== t0 ? `<text x="${W - R}" y="${H - 6}" text-anchor="end">${dl(t1)}</text>` : ''}`;
+  const dlb = t => new Date(t).toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' });
+  g += `<text x="${L}" y="${H - 6}">${dlb(t0)}</text>${t1 !== t0 ? `<text x="${W - R}" y="${H - 6}" text-anchor="end">${dlb(t1)}</text>` : ''}`;
   series.forEach(sr => {
     if (!sr.points.length) return;
-    g += `<polyline fill="none" stroke="${sr.color}" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" points="${sr.points.map(p => `${X(p.t).toFixed(1)},${Y(p.v).toFixed(1)}`).join(' ')}"/>`;
-    sr.points.forEach((p, i) => { const last = i === sr.points.length - 1; g += `<circle cx="${X(p.t).toFixed(1)}" cy="${Y(p.v).toFixed(1)}" r="${last ? 4.5 : 3}" fill="${last ? sr.color : 'var(--surface)'}" stroke="${sr.color}" stroke-width="2"/>`; });
+    g += `<polyline fill="none" stroke="${sr.color}" stroke-width="2.5" ${sr.dash ? 'stroke-dasharray="5 4"' : ''} stroke-linejoin="round" stroke-linecap="round" points="${sr.points.map(p => `${X(p.t).toFixed(1)},${Y(p.v).toFixed(1)}`).join(' ')}"/>`;
+    sr.points.forEach((p, i) => { const last = i === sr.points.length - 1; g += `<circle cx="${X(p.t).toFixed(1)}" cy="${Y(p.v).toFixed(1)}" r="${last ? 4.5 : 3}" fill="${last ? sr.color : '#000'}" stroke="${sr.color}" stroke-width="2"/>`; });
   });
   return `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Verlauf ${esc(label)}">${g}</svg>`;
 }
-
+const LEG = (dash) => `<svg width="18" height="4" aria-hidden="true"><line x1="0" y1="2" x2="18" y2="2" stroke="#fff" stroke-width="3" ${dash ? 'stroke-dasharray="4 3"' : ''}/></svg>`;
 function viewExercise(id) {
   const s = st(), me = cfg.me, other = partner();
   const info = s.exInfo[id];
   if (!info) return '<div class="empty">Diese Übung gibt es nicht.</div>';
+  const day = exerciseDay(id);
   const def = DAYS.map(d => s.plans[me][d].exercises.find(x => x.id === id)).find(Boolean) || DAYS.map(d => s.plans[other][d].exercises.find(x => x.id === id)).find(Boolean);
   const type = (def && def.type) || info.type;
   const sessionsOf = p => normalSessions(p, id, type);
   const weighted = type === 'kg' || (type === 'bw' && [me, other].some(p => sessionsOf(p).some(h => usesWeight(h.type, h.sets))));
   const value = h => type === 'time' ? Math.max(...h.sets.map(x => x.r)) : weighted ? workW(h.sets) : sum(h.sets.map(x => x.r));
   const label = type === 'time' ? 'Längster Satz (Sek.)' : type === 'kg' ? 'Schwerster Satz (kg)' : weighted ? 'Zusatzgewicht (kg)' : 'Wiederholungen gesamt';
-  const series = [me, other].map(p => ({ p, color: p === 'Rob' ? 'var(--rob)' : 'var(--accent)', points: sessionsOf(p).filter(h => h.sets.length).map(h => ({ t: +new Date(h.ts), v: value(h) })) }));
+  const series = [me, other].map(p => ({ p, color: p === me ? '#fff' : 'rgba(255,255,255,.75)', dash: p !== me, points: sessionsOf(p).filter(h => h.sets.length).map(h => ({ t: +new Date(h.ts), v: value(h) })) }));
   const best = p => { const h = sessionsOf(p).filter(x => x.sets.length); if (!h.length) return '–'; const b = h.reduce((a, x) => score(x.type, x.sets) > score(a.type, a.sets) ? x : a); return metricLabel(b.type, b.sets); };
   const sessions = [...(s.hist[me][id] || []), ...(s.hist[other][id] || [])].sort((a, b) => b.ts.localeCompare(a.ts));
-  return `<section class="card">
-      <h1 class="display" style="font-size:34px">${esc((def && def.name) || info.name)}</h1>
-      <div class="small muted">${TYPE_LABEL[type]}${def ? ` · ${def.sets}×${def.min}–${def.max}${type === 'time' ? ' s' : ''}` : ' · im Archiv'}</div>
-      ${def && def.cue ? `<p style="margin:0">${esc(def.cue)}</p>` : ''}
-      ${def && def.image ? `<img src="${esc(def.image)}" alt="${esc(def.name)}" loading="lazy" style="border-radius:10px">` : ''}
+  return `<div style="display:flex;flex-direction:column;gap:8px">
+      <div style="display:flex;gap:8px;align-items:center">${day ? dayChip(day, me, 'lg') : '<span class="tag" style="margin:0">Archiv</span>'}<span class="mono muted small">${TYPE_LABEL[type]}${def ? ` · ${def.sets}×${def.min}–${def.max}${type === 'time' ? ' s' : ''}` : ''}</span></div>
+      <h1 style="margin:0;font-size:30px;font-weight:700;letter-spacing:-.02em;line-height:1.1">${esc((def && def.name) || info.name)}</h1>
+      ${def && def.cue ? `<span class="muted" style="font-size:14px">${esc(def.cue)}</span>` : ''}
+      ${def && def.image ? `<img src="${esc(def.image)}" alt="${esc(def.name)}" loading="lazy" style="border-radius:14px">` : ''}
       <a class="vlink" href="${esc(videoUrl(def || { name: info.name }))}" target="_blank" rel="noopener">▶ ${def && def.video ? 'Video ansehen' : 'Videos auf YouTube suchen'}</a>
-    </section>
-    <div class="duo">
-      <section class="card"><span class="who ${cls(me)}">Du</span><span class="big">${best(me)}</span><span class="small muted">Bestwert</span></section>
-      <section class="card"><span class="who ${cls(other)}">${esc(other)}</span><span class="big">${best(other)}</span><span class="small muted">Bestwert</span></section>
     </div>
-    <section class="card chart"><b>${label}</b>
-      <div class="legend"><span class="who ${cls(me)}">Du</span><span class="who ${cls(other)}">${esc(other)}</span><span class="muted small">ohne Deload</span></div>
-      ${chartSvg(series, label)}</section>
+    <div class="stat2">
+      <div class="card"><span class="who">${avatar(me, 24)}Du</span><span class="val">${best(me)}</span><span class="eyebrow">Bestwert</span></div>
+      <div class="card"><span class="who">${avatar(other, 24)}${esc(other)}</span><span class="val">${best(other)}</span><span class="eyebrow">Bestwert</span></div>
+    </div>
+    <section class="card chart"><div class="rowbetween"><b>${label}</b><div class="legend"><span class="ln">${LEG(false)}Du</span><span class="ln">${LEG(true)}${esc(other)}</span></div></div>
+      ${chartSvg(series, label)}<span class="small muted">ohne Deload-Einheiten</span></section>
     <div class="sec-title"><h2>Alle Einheiten</h2></div>
-    <section class="card">${sessions.length ? sessions.map(h => `<div class="sess"><div class="top"><span class="who ${cls(h.person)}">${h.person === me ? 'Du' : esc(h.person)}</span><span>${fmtDate(h.ts)} · Tag ${h.day}${h.deload ? ' · Deload' : ''}${h.feel ? ' · ' + FEEL[h.feel] : ''}</span></div>
-      <div class="v">${fmtSets(h.type, h.sets)}</div>${h.note ? `<div class="quote ${cls(h.person)}">${esc(h.note)}</div>` : ''}</div>`).join('') : '<div class="empty">Noch nicht trainiert.</div>'}</section>`;
+    <section class="card">${sessions.length ? sessions.map(h => `<div class="sess"><div class="top"><span class="who" style="color:var(--fg)">${h.person === me ? 'Du' : esc(h.person)}</span><span class="mono">${fmtDate(h.ts)}${h.deload ? ' · Deload' : ''}${h.feel ? ' · ' + FEEL[h.feel] : ''}</span></div>
+      <div class="v">${fmtSets(h.type, h.sets)}</div>${h.note ? `<p class="quote muted">${esc(h.note)}</p>` : ''}</div>`).join('') : '<div class="empty">Noch nicht trainiert.</div>'}</section>`;
 }
-
 function viewWorkout(id) {
   const e = st().workouts.find(w => w.id === id);
   if (!e) return '<div class="empty">Training nicht gefunden.</div>';
   const d = e.data, imp = improvements(e);
-  return `<section class="card"><span class="who ${cls(e.person)}">${esc(e.person)}</span>
-      <h1 class="display" style="font-size:34px">Tag ${d.day} · ${esc(d.title)}</h1>
-      <div class="small muted">${fmtDate(e.ts)}, ${fmtTime(d.start)}–${fmtTime(d.end)} · ${duration(d.start, d.end)}${d.deload ? ' · Deload' : ''}</div>
-      ${imp.length ? `<div class="chips">${imp.map(i => `<span class="chip ${i.pr ? 'pr' : 'up'}">${esc(i.name)} ${esc(i.label)}${i.pr ? ' · Rekord' : ''}</span>`).join('')}</div>` : ''}</section>
-    <section class="card">${d.entries.map(en => `<a class="sess" href="#uebung:${encodeURIComponent(en.exId)}" style="text-decoration:none;color:inherit"><div class="top"><b style="color:var(--fg)">${esc(en.name)}</b><span>${en.sets.length} ${en.sets.length === 1 ? 'Satz' : 'Sätze'}${en.feel ? ' · ' + FEEL[en.feel] : ''}</span></div>
-      <div class="v">${fmtSets(en.type, en.sets)}</div>${en.note ? `<div class="quote ${cls(e.person)}">${esc(en.note)}</div>` : ''}</a>`).join('')}</section>`;
+  return `<div style="display:flex;flex-direction:column;gap:8px"><span class="who">${avatar(e.person, 28)}${e.person === cfg.me ? 'Du' : esc(e.person)}</span>
+      <h1 class="kurz" style="font-size:64px">${esc(dl(d.day, e.person))}</h1><div style="font-size:18px;font-weight:600">${esc(d.title)}</div>
+      <div class="mono muted small">${fmtDate(e.ts)}, ${fmtTime(d.start)}–${fmtTime(d.end)} · ${duration(d.start, d.end)}${d.deload ? ' · Deload' : ''}</div>
+      ${imp.length ? `<div class="chips">${imp.map(i => `<span class="chip ${i.pr ? 'pr' : ''}">${esc(i.name)} ${esc(i.label)}${i.pr ? ' · Rekord' : ''}</span>`).join('')}</div>` : ''}</div>
+    <section class="card">${d.entries.map(en => `<a class="sess" href="#uebung:${encodeURIComponent(en.exId)}"><div class="top"><b style="color:var(--fg)">${esc(en.name)}</b><span class="mono">${en.sets.length} ${en.sets.length === 1 ? 'Satz' : 'Sätze'}${en.feel ? ' · ' + FEEL[en.feel] : ''}</span></div>
+      <div class="v">${fmtSets(en.type, en.sets)}</div>${en.note ? `<p class="quote muted">${esc(en.note)}</p>` : ''}</a>`).join('')}</section>`;
+}
+
+/* ---------- Profil ---------- */
+function viewProfile(p) {
+  const s = st(), own = p === cfg.me;
+  const ws = s.workouts.filter(w => w.person === p);
+  const wk = weekStart();
+  const counts = DAYS.map(d => ws.filter(w => w.data.day === d).length);
+  const tot = ws.length;
+  const bw = s.bw[p], lb = bw[bw.length - 1], pb = bw[bw.length - 2];
+  const since = s.first[p];
+  const meta = `${since ? 'Trainiert seit ' + new Date(since).toLocaleDateString('de-DE') : 'Noch keine Einträge'} · als Nächstes ${esc(dl(nextDay(p), p))}`;
+  const ring = `<div class="pf-ring">${avatar(p, 114)}${own ? `<label class="pf-cam" aria-label="Profilbild ändern">${ICON.cam.replace('width="22" height="22"', 'width="16" height="16"')}<input type="file" id="av-file" accept="image/*" hidden></label>` : ''}</div>`;
+  const bar = `<section class="card"><div class="rowbetween"><span class="eyebrow">Trainings nach Tag</span><span class="mono muted small">${tot}</span></div>
+      <div class="daybar">${tot ? DAYS.map((d, i) => counts[i] ? `<i class="t-${DAY_TONE[d]}" style="flex:${counts[i]}"></i>` : '').join('') : ''}</div>
+      <div class="legend mono">${DAYS.map((d, i) => `<span>${esc(dl(d, p))} ${counts[i]}</span>`).join('')}</div></section>`;
+  if (own) {
+    return `<div class="pf">${ring}<h1 class="display">${esc(p)}</h1><span class="mono muted small">${meta}</span></div>
+      <div class="stat2">
+        <div class="card"><span class="val">${tot}</span><span class="eyebrow">Trainings</span></div>
+        <a class="card" href="#gewicht"><span class="val">${lb ? fmtN(lb.kg) + '<small> kg</small>' : '–'}</span><span class="eyebrow">Körpergewicht${pb ? ` · ${lb.kg - pb.kg >= 0 ? '+' : '−'}${fmtN(Math.abs(lb.kg - pb.kg))}` : ''}</span></a>
+      </div>
+      ${bar}
+      <a class="vaultcard glass" href="#vault"><span class="ic">${ICON.lock}</span><span style="flex:1;display:flex;flex-direction:column;gap:2px"><b>Vault</b><span class="small muted">${vmeta() ? 'Private Bilder · nur für dich' : 'Private Fortschrittsbilder · Code festlegen'}</span></span>${ICON.right}</a>`;
+  }
+  const recent = ws.slice().reverse().slice(0, 3);
+  return `<div class="pf">${ring}<h1 class="display">${esc(p)}</h1><span class="mono muted small">${meta}</span></div>
+    <div class="stat2">
+      <div class="card"><span class="val">${tot}</span><span class="eyebrow">Trainings</span></div>
+      <div class="card"><span class="val">${ws.filter(w => new Date(w.ts) >= wk).length}<small> / 3</small></span><span class="eyebrow">Diese Woche</span></div>
+    </div>
+    ${bar}
+    ${recent.length ? `<section class="card" style="padding:4px 16px"><div class="feed">${recent.map(feedItem).join('')}</div></section>` : ''}`;
+}
+async function setAvatar(file) {
+  try {
+    let q = 0.8, data = '';
+    const c = await resizeImage(file, 220, true);
+    do { data = c.toDataURL('image/jpeg', q); q -= 0.1; } while (data.length > 40000 && q > 0.3);
+    if (data.length > 40000) { toast('Das Bild ist zu groß. Bitte ein anderes wählen.'); return; }
+    addEvent('avatar', { img: data }, 'Profilbild aktualisiert');
+    toast('Profilbild gespeichert'); render();
+  } catch (e) { toast('Das Bild konnte nicht gelesen werden.'); }
+}
+
+/* ---------- Vault ---------- */
+const PIN_TITLE = { unlock: 'Gib deinen Code ein', set1: 'Lege einen 4-stelligen Code fest', set2: 'Code zur Bestätigung wiederholen', old: 'Aktuellen Code eingeben', new1: 'Neuen 4-stelligen Code eingeben', new2: 'Neuen Code wiederholen', import: 'Code des Backups eingeben' };
+function pinPad() {
+  const mode = VAULT.mode;
+  const dots = [0, 1, 2, 3].map(i => `<i class="${i < VAULT.pin.length ? 'on' : ''}"></i>`).join('');
+  const k = n => `<button class="key" data-act="pin" data-v="${n}">${n}</button>`;
+  return `<div class="lock"><span class="ic glass">${ICON.lock}</span><h1 class="display" style="font-size:40px">Vault</h1>
+    <span class="muted">${PIN_TITLE[mode]}</span>
+    <div class="pins ${VAULT.bad ? 'bad' : ''}" aria-label="${VAULT.pin.length} von 4 Ziffern eingegeben">${dots}</div>
+    ${VAULT.msg ? `<span class="${/Falsch|stimmen|Zu viele/.test(VAULT.msg) ? 'err' : 'muted'}">${esc(VAULT.msg)}</span>` : ''}
+    <div class="pad">${k(1)}${k(2)}${k(3)}${k(4)}${k(5)}${k(6)}${k(7)}${k(8)}${k(9)}<a class="key plain" href="#${mode === 'old' || mode.startsWith('new') ? 'einstellungen' : 'profil'}">Abbrechen</a>${k(0)}<button class="key plain" data-act="pin-del" aria-label="Letzte Ziffer löschen">${ICON.del}</button></div>
+    <span class="small muted" style="max-width:300px">${mode === 'set1' || mode === 'set2' ? 'Den Code brauchst du bei jedem Öffnen. Ohne ihn lassen sich die Bilder nicht wiederherstellen.' : 'Der Vault liegt nur auf diesem Handy und ist nur mit deinem Code lesbar.'}</span></div>`;
+}
+function viewVault() {
+  if (!vmeta() && !VAULT.importData) { if (VAULT.mode !== 'set2') VAULT.mode = 'set1'; return pinPad(); }
+  if (!VAULT.key || VAULT.mode !== 'unlock') return pinPad();
+  const list = VAULT.entries || [];
+  const items = list.map(e => `<div class="en">
+      <div class="rowbetween"><b class="mono" style="font-size:14px">${fmtLong(e.date + 'T12:00')}</b><span class="mono muted small">${relDay(e.date + 'T12:00')}</span></div>
+      <div class="photo"><img data-vimg="${esc(e.id)}" alt="Fortschrittsbild vom ${esc(e.date)}">${e.bw ? `<span class="bwtag">${fmtN(e.bw)} kg</span>` : ''}</div>
+      ${e.note ? `<p class="quote">${esc(e.note)}</p>` : ''}
+      ${VAULT.del === e.id ? `<div class="confirm"><b>Bild endgültig löschen?</b><div class="btnrow"><button class="btn small danger" data-act="v-del-yes" data-id="${esc(e.id)}">Löschen</button><button class="btn small ghost" data-act="v-del-no">Abbrechen</button></div></div>` : `<button class="addset" data-act="v-del" data-id="${esc(e.id)}" style="align-self:flex-start;color:var(--dim)">Löschen</button>`}
+    </div>`).join('');
+  return `<div class="rowbetween" style="align-items:flex-end"><div style="display:flex;flex-direction:column;gap:6px"><h1 class="display" style="font-size:40px">Vault</h1><span class="mono muted small">${list.length} ${list.length === 1 ? 'Bild' : 'Bilder'}${list.length ? ' · seit ' + new Date(list[list.length - 1].date + 'T12:00').toLocaleDateString('de-DE') : ''}</span></div><a class="btn primary small" href="#vault-neu">${ICON.plus} Foto</a></div>
+    ${list.length ? `<div class="tl">${items}</div>` : `<section class="card"><div class="empty">Noch keine Bilder. Mit „Foto“ legst du dein erstes Fortschrittsbild an. Tipp: gleiche Stelle, gleiches Licht, gleiche Pose.</div></section>`}`;
+}
+function viewVaultNew() {
+  const bw = st().bw[cfg.me]; const lb = bw[bw.length - 1];
+  return `<form class="form" id="vaultform" novalidate>
+    <h1 class="display" style="font-size:30px">Neuer Eintrag</h1>
+    <div class="pickphoto glass">${VAULT.photoUrl ? `<img src="${VAULT.photoUrl}" alt="Gewähltes Foto">` : `${ICON.cam}<b>Foto aufnehmen oder auswählen</b><span class="small muted">Tipp: gleiche Stelle, gleiches Licht, gleiche Pose</span>`}
+      <input type="file" id="vn-file" accept="image/*" aria-label="Foto aufnehmen oder auswählen"></div>
+    <div class="grid2"><label>Datum<input class="inp mono" type="date" id="vn-date" name="date" value="${todayStr()}" max="${todayStr()}"></label>
+      <label>Körpergewicht (kg)<input class="inp mono" id="vn-bw" name="bw" inputmode="decimal" value="${lb ? fmtIn(lb.kg) : ''}" placeholder="optional"></label></div>
+    <label>Notiz<textarea id="vn-note" name="note" rows="3" maxlength="2000" placeholder="z. B. Pump nach B&T, Brust oben voller"></textarea></label>
+    <div class="err" id="vn-err" hidden></div>
+    <button class="btn primary" id="vn-save" type="submit">Im Vault speichern</button>
+    <span class="small muted" style="text-align:center">Wird nur auf diesem Handy gespeichert, verschlüsselt mit deinem Code. ${esc(partner())} sieht es nie.</span>
+  </form>`;
 }
 
 /* ---------- Körpergewicht ---------- */
 function viewBodyweight() {
   const list = st().bw[cfg.me];
   const pts = list.map(b => ({ t: +new Date(b.ts), v: b.kg }));
-  return `<section class="card form">
-      <label>Neuer Eintrag<div class="bwin"><span class="field"><input id="bw-in" inputmode="decimal" autocomplete="off" placeholder="z. B. 82,4" aria-label="Körpergewicht in kg"><span>kg</span></span><button class="btn small" data-act="bw-save">Eintragen</button></div></label>
-      <span class="small muted">Am besten einmal pro Woche morgens vor dem Frühstück. Dein Körpergewicht siehst nur du in der App.</span>
+  return `<h1 class="display" style="font-size:30px">Körpergewicht</h1>
+    <section class="card form">
+      <label>Neuer Eintrag<div class="bwin" style="display:flex;gap:8px"><span class="field" style="flex:1"><input id="bw-in" inputmode="decimal" autocomplete="off" placeholder="z. B. 82,4" aria-label="Körpergewicht in kg"><span>kg</span></span><button class="btn small primary" data-act="bw-save">Eintragen</button></div></label>
+      <span class="help">Am besten einmal pro Woche morgens vor dem Frühstück. Dein Körpergewicht siehst nur du in der App.</span>
     </section>
-    <section class="card chart"><b>Verlauf (kg)</b>${chartSvg([{ p: cfg.me, color: cfg.me === 'Rob' ? 'var(--rob)' : 'var(--accent)', points: pts }], 'Körpergewicht')}</section>
-    <section class="card">${list.length ? list.slice().reverse().map(b => `<div class="sess"><div class="top"><span>${fmtDate(b.ts)}</span><span class="mono">${fmtN(b.kg)} kg</span></div></div>`).join('') : '<div class="empty">Noch kein Eintrag.</div>'}</section>`;
+    <section class="card chart"><b>Verlauf (kg)</b>${chartSvg([{ color: '#fff', points: pts }], 'Körpergewicht')}</section>
+    <section class="card">${list.length ? list.slice().reverse().map(b => `<div class="sess"><div class="top"><span class="mono">${fmtDate(b.ts)}</span><span class="mono" style="color:var(--fg)">${fmtN(b.kg)} kg</span></div></div>`).join('') : '<div class="empty">Noch kein Eintrag.</div>'}</section>`;
 }
 
 /* ---------- Notizen ---------- */
@@ -1030,11 +1318,11 @@ function viewNotes() {
   items.reverse();
   const shown = items.filter(x => notesFilter === 'Alle' || x.w.person === notesFilter);
   const seg = `<div class="seg" role="group" aria-label="Filter">${['Alle', ...PEOPLE].map(f => `<button data-act="nfilter" data-v="${f}" aria-pressed="${notesFilter === f}">${f === cfg.me ? 'Meine' : f}</button>`).join('')}</div>`;
-  return seg + `<section class="card">${shown.length ? shown.map(({ w, en }) => `<a class="sess" href="#uebung:${encodeURIComponent(en.exId)}" style="text-decoration:none;color:inherit">
-      <div class="top"><b style="color:var(--fg)">${esc(en.name)}</b><span>${fmtDate(w.ts)}</span></div>
-      <div class="small"><span class="who ${cls(w.person)}">${esc(w.person)}</span> <span class="muted">· Tag ${w.data.day} · ${fmtSets(en.type, en.sets)}</span></div>
-      <div class="quote ${cls(w.person)}">${esc(en.note)}</div></a>`).join('')
-    : '<div class="empty">Noch keine kommentierten Übungen. Im Training kannst du zu jeder Übung eine Notiz schreiben.</div>'}</section>`;
+  return seg + (shown.length ? shown.map(({ w, en }) => `<a class="card" href="#uebung:${encodeURIComponent(en.exId)}" style="text-decoration:none;color:var(--fg);gap:8px">
+      <div style="display:flex;align-items:center;gap:8px">${dayChip(w.data.day, w.person)}<b style="flex:1;min-width:0">${esc(en.name)}</b><span class="mono muted small">${fmtDate(w.ts)}</span></div>
+      <p class="quote" style="font-size:16px">${esc(en.note)}</p>
+      <div class="who small muted">${avatar(w.person, 20)}${w.person === cfg.me ? 'Du' : esc(w.person)} · <span class="mono">${fmtSets(en.type, en.sets)}</span></div></a>`).join('')
+    : '<section class="card"><div class="empty">Noch keine kommentierten Übungen. Im Training kannst du zu jeder Übung eine Notiz schreiben.</div></section>');
 }
 
 /* ---------- Planänderungen (Glocke) ---------- */
@@ -1043,38 +1331,38 @@ function viewBell() {
   const label = { open: 'Neu', dismissed: 'Ausgeblendet', diverged: 'Weicht ab' };
   const items = list.map(x => {
     const c = x.pc, inDraft = draft && draft.day === x.day;
-    return `<section class="card">
-      <div class="rowbetween"><span class="who ${cls(c.person)}">${esc(c.person)}</span><span class="pill ${x.status}">${label[x.status]}</span></div>
-      <b>Tag ${x.day} · ${esc(s.plans[c.person][x.day].title)}</b>
-      <div class="small muted">Geändert ${fmtDate(c.ts)}, ${fmtTime(c.ts)}${x.status === 'diverged' ? ' · du hast diesen Tag danach selbst geändert' : ''}</div>
+    return `<section class="card" style="gap:14px">
+      <div style="display:flex;align-items:center;gap:10px">${avatar(c.person, 36)}<div style="flex:1;display:flex;flex-direction:column"><b>${esc(c.person)}</b><span class="mono muted small">${fmtDate(c.ts)} · ${fmtTime(c.ts)}${x.status === 'diverged' ? ' · du hast den Tag danach geändert' : ''}</span></div><span class="pill ${x.status}">${label[x.status]}</span></div>
+      <div style="display:flex;align-items:center;gap:8px">${dayChip(x.day, cfg.me, 'lg')}<b style="font-size:16px">${esc(s.plans[c.person][x.day].title)}</b></div>
       ${diffList(x.diff)}
-      <div class="small muted">Deine abweichenden Übungen und persönlichen Werte (Steigerung, Ausführung, Links) bleiben erhalten.</div>
-      <div class="btnrow"><button class="btn small accent" data-act="accept" data-id="${esc(c.id)}">In meinen Plan übernehmen</button>
-        ${x.status === 'open' ? `<button class="btn small ghost" data-act="dismiss" data-id="${esc(c.id)}">Ausblenden</button>` : ''}</div>
-      ${inDraft ? `<button class="btn small" data-act="accept-draft" data-id="${esc(c.id)}">Übernehmen und ins laufende Training</button><span class="small muted">Eingaben bleiben erhalten. Übungen mit Einträgen, die wegfallen, bleiben im Training als „Nicht mehr im Plan“.</span>` : ''}
+      <span class="small muted">Deine abweichenden Übungen und persönlichen Werte bleiben erhalten.</span>
+      <div class="btnrow"><button class="btn primary" data-act="accept" data-id="${esc(c.id)}">In meinen Plan übernehmen</button>
+        ${x.status === 'open' ? `<button class="btn" data-act="dismiss" data-id="${esc(c.id)}">Ausblenden</button>` : ''}</div>
+      ${inDraft ? `<button class="btn ghost" data-act="accept-draft" data-id="${esc(c.id)}">Übernehmen und ins laufende Training</button><span class="small muted">Eingaben bleiben erhalten. Übungen mit Einträgen, die wegfallen, bleiben im Training als „Nicht mehr im Plan“.</span>` : ''}
     </section>`;
   });
   const mine = DAYS.map(d => s.lastChange[cfg.me + '|' + d]).filter(Boolean);
   const mineHtml = mine.map(c => {
     const same = !sharedDiff(s.plans[other][c.data.day], s.plans[cfg.me][c.data.day]).length;
-    return `<div class="sess"><div class="top"><b style="color:var(--fg)">Tag ${c.data.day} · ${esc(c.data.title)}</b><span class="pill ${same ? 'accepted' : 'open'}">${same ? `Bei ${esc(other)} gleich` : `Bei ${esc(other)} offen`}</span></div><div class="small muted">Zuletzt gespeichert ${fmtDate(c.ts)}, ${fmtTime(c.ts)}</div></div>`;
+    return `<div class="sess"><div class="top"><span style="display:flex;gap:8px;align-items:center;color:var(--fg)">${dayChip(c.data.day)}<b>${esc(c.data.title)}</b></span><span class="pill ${same ? 'accepted' : ''}">${same ? `bei ${esc(other)} gleich` : `bei ${esc(other)} offen`}</span></div><span class="mono muted small">zuletzt gespeichert ${fmtDate(c.ts)}, ${fmtTime(c.ts)}</span></div>`;
   }).join('');
-  return `<p class="muted small" style="margin:0 2px">Hier siehst du, wenn ${esc(other)} gemeinsame Übungen eines Trainingstags geändert hat. Abweichende Übungen und persönliche Werte lösen keine Meldung aus.</p>
+  return `<h1 class="display" style="font-size:30px">Plan&shy;änderungen</h1>
+    <p class="muted small" style="margin:0">Wenn ${esc(other)} gemeinsame Übungen ändert, siehst du es hier. Abweichende Übungen und persönliche Werte lösen keine Meldung aus.</p>
     ${items.join('') || `<section class="card"><div class="empty">Keine Unterschiede. Eure gemeinsamen Übungen sind gleich.</div></section>`}
     ${mine.length ? `<div class="sec-title"><h2>Deine Änderungen</h2></div><section class="card">${mineHtml}</section>` : ''}`;
 }
 function acceptChange(changeId, intoDraft) {
   const s = st(), c = s.changes[changeId]; if (!c) return;
   const merged = mergePlan(s.plans[cfg.me][c.data.day], s.plans[c.person][c.data.day]);
-  addEvent('plan_decision', { changeId, decision: 'accepted', result: merged }, `Änderung von ${c.person} an Tag ${c.data.day} übernommen`);
+  addEvent('plan_decision', { changeId, decision: 'accepted', result: merged }, `Änderung von ${c.person} an ${dl(c.data.day)} übernommen`);
   if (builder && !Object.values(builder.dirty).some(Boolean)) builder = null;
-  if (intoDraft && draft && draft.day === c.data.day) { applyToDraft(merged); toast(`Tag ${c.data.day} übernommen, auch ins laufende Training`); location.hash = '#training'; return; }
-  toast(`Tag ${c.data.day} übernommen. Gilt ab dem nächsten Training.`);
+  if (intoDraft && draft && draft.day === c.data.day) { applyToDraft(merged); toast(`${dl(c.data.day)} übernommen, auch ins laufende Training`); location.hash = '#training'; return; }
+  toast(`${dl(c.data.day)} übernommen. Gilt ab dem nächsten Training.`);
   render();
 }
 function dismissChange(changeId) {
   const c = st().changes[changeId]; if (!c) return;
-  addEvent('plan_decision', { changeId, decision: 'dismissed' }, `Änderung von ${c.person} an Tag ${c.data.day} ausgeblendet`);
+  addEvent('plan_decision', { changeId, decision: 'dismissed' }, `Änderung von ${c.person} an ${dl(c.data.day)} ausgeblendet`);
   toast('Ausgeblendet. Du kannst sie später noch übernehmen.');
   render();
 }
@@ -1088,26 +1376,26 @@ function ensureBuilder() {
 function viewPlan() {
   ensureBuilder();
   const b = builder, d = b.day, w = b.work[d], other = partner();
-  const seg = `<div class="seg" role="group" aria-label="Trainingstag">${DAYS.map(k => `<button data-act="bday" data-v="${k}" aria-pressed="${k === d}">Tag ${k}${b.dirty[k] ? '<i class="mark"></i>' : ''}</button>`).join('')}</div>`;
+  const seg = `<div class="seg" role="group" aria-label="Trainingstag">${DAYS.map(k => `<button data-act="bday" data-v="${k}" aria-pressed="${k === d}"><i class="dot t-${DAY_TONE[k]}" style="width:9px;height:9px;margin-right:6px;vertical-align:1px"></i>${esc(b.work[k].short || DAY_SHORT[k])}${b.dirty[k] ? '<i class="mark"></i>' : ''}</button>`).join('')}</div>`;
   const rows = w.exercises.map((x, i) => `<div class="prow">
       <div class="n"><b>${esc(x.name)}</b><span class="small muted">${TYPE_LABEL[x.type]} · ${x.sets}×${x.min}–${x.max}${x.type === 'time' ? ' s' : ''}${x.type !== 'time' && x.step ? ` · +${fmtN(x.step)} kg` : ''}</span>
-        ${x.personal || x.warmup ? `<span class="tags">${x.personal ? '<span class="tag">Nur ich</span>' : ''}${x.warmup ? '<span class="tag">Aufwärmen</span>' : ''}</span>` : ''}</div>
+        ${x.personal || x.warmup ? `<span class="tags">${x.personal ? '<span class="tag">Nur ich</span>' : ''}${x.warmup ? '<span class="tag">Aufwärmsatz</span>' : ''}</span>` : ''}</div>
       <div class="tools"><button class="tool" data-act="bmove" data-i="${i}" data-v="-1" aria-label="Nach oben" ${i === 0 ? 'disabled' : ''}>${ICON.up}</button><button class="tool" data-act="bmove" data-i="${i}" data-v="1" aria-label="Nach unten" ${i === w.exercises.length - 1 ? 'disabled' : ''}>${ICON.down}</button></div>
       <div class="acts"><button data-act="bedit" data-i="${i}">Bearbeiten</button><button data-act="breplace" data-i="${i}">Austauschen</button><button class="del" data-act="bremove" data-i="${i}">Entfernen</button></div>
     </div>`).join('');
   const changes = b.dirty[d] ? diffPlan(st().plans[cfg.me][d], w, false) : [];
   return `${seg}
-    <section class="card form">
+    <section class="card form"><div class="dayinputs">
       <label>Name des Trainingstags<input class="inp" id="b-title" data-b="title" value="${esc(w.title)}" maxlength="40"></label>
-    </section>
-    <section class="card">${rows || '<div class="empty">Noch keine Übungen an diesem Tag.</div>'}
-      <button class="btn ghost" data-act="badd">+ Übung hinzufügen</button></section>
-    <p class="small muted" style="margin:0 2px">${esc(other)} bekommt nur Änderungen an gemeinsamen Übungen gemeldet: Übung, Art, Reihenfolge, Sätze, Wiederholungen, Aufwärmsätze. Steigerung, Ausführung und Links sind persönlich. Übungen mit „Nur ich“ lösen nie eine Meldung aus. Austauschen legt eine neue Übung an, der Verlauf der alten bleibt im Archiv.</p>
-    ${changes.length ? `<section class="card"><b>Ungespeicherte Änderungen an Tag ${d}</b>${diffList(changes)}</section>` : ''}
-    ${b.dirty[d] ? `<div style="height:56px"></div><div class="savebar"><span>Tag ${d} geändert</span><button class="btn ghost" data-act="bdiscard">Verwerfen</button><button class="btn" data-act="bsave">Speichern</button></div>` : ''}`;
+      <label>Kürzel<input class="inp" id="b-short" data-b="short" value="${esc(w.short || DAY_SHORT[d])}" maxlength="6" autocapitalize="characters"></label>
+    </div></section>
+    <section class="card" style="padding:4px 16px 16px">${rows || '<div class="empty">Noch keine Übungen an diesem Tag.</div>'}
+      <button class="btn ghost" data-act="badd" style="margin-top:8px">+ Übung hinzufügen</button></section>
+    <p class="small muted" style="margin:0 2px">${esc(other)} bekommt nur Änderungen an gemeinsamen Übungen gemeldet: Übung, Art, Reihenfolge, Sätze, Wiederholungen, Aufwärmsatz, Name und Kürzel des Tages. Steigerung, Ausführung und Links sind persönlich. Übungen mit „Nur ich“ lösen nie eine Meldung aus.</p>
+    ${changes.length ? `<section class="card"><b>Ungespeicherte Änderungen</b>${diffList(changes)}</section>` : ''}
+    ${b.dirty[d] ? `<div style="height:56px"></div><div class="savebar"><span>${esc(w.short || DAY_SHORT[d])} geändert</span><button class="btn ghost" data-act="bdiscard">Verwerfen</button><button class="btn primary" data-act="bsave">Speichern</button></div>` : ''}`;
 }
 function markDirty() { builder.dirty[builder.day] = diffPlan(st().plans[cfg.me][builder.day], builder.work[builder.day], false).length > 0; }
-
 function exerciseForm(mode, i) {
   const w = builder.work[builder.day];
   const old = mode === 'add' ? null : w.exercises[i];
@@ -1122,7 +1410,7 @@ function exerciseForm(mode, i) {
     <div class="grid3"><label>Sätze<input class="inp" id="f-sets" name="sets" inputmode="numeric" value="${x.sets}"></label>
       <label><span id="f-unit-min">${x.type === 'time' ? 'Sek. von' : 'Wdh. von'}</span><input class="inp" id="f-min" name="min" inputmode="numeric" value="${x.min}"></label>
       <label>bis<input class="inp" id="f-max" name="max" inputmode="numeric" value="${x.max}"></label></div>
-    <label class="chk" id="f-warm-l" ${x.type === 'kg' ? '' : 'hidden'}><input type="checkbox" id="f-warmup" name="warmup" ${x.warmup ? 'checked' : ''}><span>Aufwärmsätze<small>Vor den Arbeitssätzen, automatisch aus dem Arbeitsgewicht berechnet. Wird mit ${esc(partner())} abgeglichen.</small></span></label>
+    <label class="chk" id="f-warm-l" ${x.type === 'kg' ? '' : 'hidden'}><input type="checkbox" id="f-warmup" name="warmup" ${x.warmup ? 'checked' : ''}><span>Aufwärmsatz<small>Ein Satz mit 60 % × 6 vor den Arbeitssätzen. Wird mit ${esc(partner())} abgeglichen.</small></span></label>
     <label class="chk"><input type="checkbox" id="f-personal" name="personal" ${x.personal ? 'checked' : ''}><span>Abweichende Übung (nur ich)<small>Gehört nicht zum gemeinsamen Training und löst bei ${esc(partner())} nie eine Meldung aus.</small></span></label>
     <div class="persbox"><div class="eyebrow">Persönlich · wird nicht abgeglichen</div>
       <label id="f-step-l" ${x.type === 'time' ? 'hidden' : ''}><span id="f-step-t">${x.type === 'bw' ? 'Steigerung Zusatzgewicht in kg (0 = keine)' : 'Steigerung in kg'}</span><input class="inp" id="f-step" name="step" inputmode="decimal" value="${fmtIn(x.step || 0)}"><span class="help">Wird vorgeschlagen, wenn alle Sätze die obere Wdh.-Zahl erreichen.</span></label>
@@ -1154,12 +1442,13 @@ function submitExercise(form) {
 }
 function savePlan() {
   const d = builder.day, w = builder.work[d];
+  w.short = (w.short || '').trim() || DAY_SHORT[d];
   const changes = diffPlan(st().plans[cfg.me][d], w, false);
   if (!changes.length) { builder.dirty[d] = false; render(); return; }
   const notify = sharedDiff(st().plans[cfg.me][d], w).length > 0 && sharedDiff(st().plans[partner()][d], w).length > 0;
-  addEvent('plan_change', { day: d, title: w.title, exercises: clone(w.exercises), changes }, `Tag ${d} geändert: ${changes.map(diffText).join('; ')}`);
+  addEvent('plan_change', { day: d, title: w.title, short: w.short, exercises: clone(w.exercises), changes }, `${w.short} geändert: ${changes.map(diffText).join('; ')}`);
   builder.dirty[d] = false;
-  toast(notify ? `Tag ${d} gespeichert. ${partner()} bekommt einen Hinweis.` : `Tag ${d} gespeichert.`);
+  toast(notify ? `${w.short} gespeichert. ${partner()} bekommt einen Hinweis.` : `${w.short} gespeichert.`);
   render();
 }
 
@@ -1167,30 +1456,43 @@ function savePlan() {
 function viewSettings() {
   const waiting = pending.filter(p => !seenIds.has(p.id)).length;
   const sv = scriptVersion == null ? '–' : scriptVersion >= SCRIPT_MIN ? `Version ${scriptVersion} ✓` : `Version ${scriptVersion} – bitte aktualisieren`;
-  return `<section class="card form">
-      <b>Sync mit Google-Tabelle</b>
+  const hasVault = !!vmeta();
+  return `<h1 class="display" style="font-size:30px">Einstellungen</h1>
+    <div class="secl">Profil</div>
+    <div class="rows glass"><label class="row" style="min-height:72px">${avatar(cfg.me, 46)}<span style="display:flex;flex-direction:column"><b>${esc(cfg.me)}</b><span class="small muted">Profilbild sehen beide</span></span><span class="v" style="color:var(--fg);font-family:var(--body);font-weight:600">Ändern</span><input type="file" id="av-file2" accept="image/*" hidden></label></div>
+    <div class="secl">Vault</div>
+    <div class="rows glass">
+      ${hasVault ? `<button class="row" data-act="v-change">Vault-Code ändern<span class="v">• • • •</span></button>
+      <button class="row" data-act="v-export">Backup sichern<span class="v">verschlüsselte Datei</span></button>` : `<a class="row" href="#vault">Vault einrichten<span class="v">Code festlegen</span></a>`}
+      <label class="row">Backup laden<span class="v">Datei wählen</span><input type="file" id="v-import" accept="application/json,.json" hidden></label>
+    </div>
+    <div class="secl">Sync mit Google-Tabelle</div>
+    <section class="card form">
       <label>Sync-Adresse<input class="inp" id="s-url" value="${esc(cfg.url)}" placeholder="https://script.google.com/macros/s/…/exec" inputmode="url" autocomplete="off"></label>
       <label>Sync-Schlüssel<input class="inp" id="s-key" value="${esc(cfg.key)}" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
       <div class="err" id="s-err" hidden></div>
-      <div class="btnrow"><button class="btn primary" data-act="s-save">Speichern & synchronisieren</button></div>
+      <button class="btn primary" data-act="s-save">Speichern & synchronisieren</button>
     </section>
-    <section class="card"><b>Status</b>
-      <dl class="kv"><dt>Ich bin</dt><dd>${esc(cfg.me)}</dd><dt>Letzter Sync</dt><dd>${lastSync ? fmtDate(lastSync) + ', ' + fmtTime(lastSync) : '–'}</dd>
-      <dt>Einträge</dt><dd>${events.length} synchronisiert, ${waiting} wartend</dd><dt>App</dt><dd>Version ${APP_VERSION}</dd><dt>Google-Skript</dt><dd>${sv}</dd></dl>
-    </section>
-    <section class="card"><b>Person wechseln</b><span class="small muted">Nur nötig, wenn diese App auf dem falschen Handy eingerichtet wurde.</span>
-      <div class="pick">${PEOPLE.map(p => `<button class="${cls(p)}" data-act="s-me" data-v="${p}" aria-pressed="${cfg.me === p}">${p}</button>`).join('')}</div></section>
+    <div class="rows glass">
+      <div class="row">Google-Skript<span class="v">${sv}</span></div>
+      <div class="row">Letzter Sync<span class="v">${lastSync ? fmtDate(lastSync) + ', ' + fmtTime(lastSync) : '–'}</span></div>
+      <div class="row">Einträge<span class="v">${events.length} synchronisiert, ${waiting} wartend</span></div>
+      <div class="row">App-Version<span class="v">${APP_VERSION}</span></div>
+    </div>
+    <div class="secl">Gerät</div>
+    <section class="card"><b>Person wechseln</b><span class="small muted">Nur nötig, wenn diese App auf dem falschen Handy eingerichtet wurde. Ein laufendes Training wird dabei verworfen.</span>
+      <div class="pick">${PEOPLE.map(p => `<button data-act="s-me" data-v="${p}" aria-pressed="${cfg.me === p}">${p}</button>`).join('')}</div></section>
     <section class="card"><b>Daten auf diesem Handy zurücksetzen</b>
-      <span class="small muted">Löscht nur die Kopie auf diesem Handy. Beim nächsten Sync wird alles aus der Tabelle neu geladen.${waiting ? ` <b>${waiting} noch nicht gesendete Einträge gehen dabei verloren.</b>` : ''}</span>
-      ${resetAsk ? `<div class="btnrow"><button class="btn small danger" data-act="reset-yes">Ja, zurücksetzen</button><button class="btn small ghost" data-act="reset-no">Abbrechen</button></div>` : `<button class="btn ghost danger" data-act="reset-ask">Zurücksetzen</button>`}
+      <span class="small muted">Löscht nur die Kopie des Trainingslogs auf diesem Handy. Beim nächsten Sync wird alles aus der Tabelle neu geladen. Der Vault bleibt erhalten.${waiting ? ` <b>${waiting} noch nicht gesendete Einträge gehen dabei verloren.</b>` : ''}</span>
+      ${resetAsk ? `<div class="btnrow"><button class="btn small danger" data-act="reset-yes">Ja, zurücksetzen</button><button class="btn small ghost" data-act="reset-no">Abbrechen</button></div>` : `<button class="btn danger" data-act="reset-ask">Zurücksetzen</button>`}
     </section>`;
 }
 let setupMe = null;
 function viewSetup() {
   return `<div class="setup">
-    <div><div class="eyebrow">Willkommen</div><h1 class="display">Hantelbuch</h1></div>
-    <p style="margin:0">Dein Trainingsplan für Brust & Trizeps, Rücken & Bizeps und Beine & Bauch. Fortschritte von Manu und Rob werden über eine gemeinsame Google-Tabelle abgeglichen.</p>
-    <div class="form"><label>Wer bist du?</label><div class="pick">${PEOPLE.map(p => `<button class="${cls(p)}" data-act="setup-me" data-v="${p}" aria-pressed="${setupMe === p}">${p}</button>`).join('')}</div></div>
+    <div><div class="eyebrow">Willkommen</div><h1 class="display">Hantel&shy;buch</h1></div>
+    <p style="margin:0" class="muted">Dein Trainingsplan für Brust & Trizeps, Rücken & Bizeps und Beine & Bauch. Fortschritte von Manu und Rob werden über eine gemeinsame Google-Tabelle abgeglichen.</p>
+    <div class="form"><label>Wer bist du?</label><div class="pick">${PEOPLE.map(p => `<button data-act="setup-me" data-v="${p}" aria-pressed="${setupMe === p}">${p}</button>`).join('')}</div></div>
     <div class="form">
       <label>Sync-Adresse<input class="inp" id="u-url" placeholder="https://script.google.com/macros/s/…/exec" inputmode="url" autocomplete="off"></label>
       <label>Sync-Schlüssel<input class="inp" id="u-key" autocomplete="off" autocapitalize="off" spellcheck="false"><span class="help">Beides findest du in der Google-Tabelle auf dem Blatt „Info“.</span></label>
@@ -1220,7 +1522,7 @@ const actions = {
   'start-normal': () => startTraining(true),
   'skip-ask': () => { skipAsk = true; render(); },
   'skip-no': () => { skipAsk = false; render(); },
-  'skip-yes': () => { const d = nextDay(cfg.me); addEvent('skip', { day: d }, `Tag ${d} übersprungen`); skipAsk = false; toast(`Tag ${d} übersprungen`); render(); },
+  'skip-yes': () => { const d = nextDay(cfg.me); addEvent('skip', { day: d }, `${dl(d)} übersprungen`); skipAsk = false; toast(`${dl(d)} übersprungen`); render(); },
   sync: () => sync({ overlay: true }),
   check: t => {
     const i = +t.dataset.i, j = +t.dataset.j, x = draft.items[i].ex, s = readSetInputs(i, j);
@@ -1229,7 +1531,7 @@ const actions = {
     s.done = !s.done; saveDraft(); rerenderCard(i);
   },
   sign: t => { const i = +t.dataset.i, s = readSetInputs(i, +t.dataset.j); s.neg = !s.neg; saveDraft(); rerenderCard(i); },
-  wu: t => { const it = draft.items[+t.dataset.i], k = +t.dataset.k; it.wu[k] = !it.wu[k]; saveDraft(); rerenderCard(+t.dataset.i); },
+  wu: t => { const it = draft.items[+t.dataset.i]; it.wu[0] = !it.wu[0]; saveDraft(); rerenderCard(+t.dataset.i); },
   feel: t => { const it = draft.items[+t.dataset.i]; it.feel = it.feel === t.dataset.v ? '' : t.dataset.v; saveDraft(); rerenderCard(+t.dataset.i); },
   'plateau-down': t => {
     const i = +t.dataset.i, it = draft.items[i], pr = progression(it.ex);
@@ -1238,19 +1540,18 @@ const actions = {
     it.sets.forEach(s => { if (!s.done) { s.w = w ? fmtIn(w) : ''; s.neg = w < 0; } });
     saveDraft(); rerenderCard(i); toast('Gewicht für heute um 10 % reduziert');
   },
-  addset: t => { const it = draft.items[+t.dataset.i]; const l = it.sets[it.sets.length - 1]; it.sets.push({ w: l ? l.w : '', neg: l ? l.neg : false, r: '', done: false }); saveDraft(); rerenderCard(+t.dataset.i); },
+  addset: t => { const i = +t.dataset.i, it = draft.items[i]; it.sets.forEach((s, j) => readSetInputs(i, j)); const l = it.sets[it.sets.length - 1]; it.sets.push({ w: l ? l.w : '', neg: l ? l.neg : false, r: '', done: false }); saveDraft(); rerenderCard(i); },
+  delset: t => { const i = +t.dataset.i, it = draft.items[i]; if (it.sets.length <= 1) return; it.sets.forEach((s, j) => readSetInputs(i, j)); it.sets.pop(); saveDraft(); rerenderCard(i); },
   'swap-open': t => swapForm(+t.dataset.i),
   'swap-follow': t => {
     const sw = st().swaps.find(e => e.id === t.dataset.id), i = +t.dataset.i; if (!sw) return;
     doSwap(i, clone(sw.data.to), { id: sw.data.fromId, name: sw.data.fromName }, sw.person, false); render(); toast('Getauscht');
   },
   'swap-ignore': t => { draft.swapIgnored.push(t.dataset.id); saveDraft(); render(); },
-  'finish-ask': () => { finishAsk = true; discardAsk = false; render(); setTimeout(() => { const f = $('.finishbar'); if (f) f.scrollIntoView({ behavior: 'smooth', block: 'center' }); }, 30); },
-  'finish-no': () => { finishAsk = false; render(); },
+  'finish-ask': () => finishSheet(),
   'finish-yes': () => finishTraining(),
-  'discard-ask': () => { discardAsk = true; finishAsk = false; render(); },
-  'discard-no': () => { discardAsk = false; render(); },
-  'discard-yes': () => { draft = null; saveDraft(); discardAsk = false; toast('Training verworfen'); location.hash = '#start'; },
+  'discard-ask': () => discardSheet(),
+  'discard-yes': () => { draft = null; saveDraft(); $('#modal').innerHTML = ''; toast('Training verworfen'); location.hash = '#start'; },
   'bw-save': () => {
     const el = $('#bw-in'), v = num(el && el.value);
     if (v < 30 || v > 300) { toast('Bitte ein Gewicht zwischen 30 und 300 kg eingeben.'); return; }
@@ -1273,8 +1574,16 @@ const actions = {
   bsave: () => savePlan(),
   mclose: () => { $('#modal').innerHTML = ''; },
   'mclose-bg': (t, e) => { if (e.target === t) $('#modal').innerHTML = ''; },
+  pin: t => { if (VAULT.pin.length >= 4) return; VAULT.pin += t.dataset.v; VAULT.msg = ''; if (VAULT.pin.length === 4) { render(); pinComplete(); } else render(); },
+  'pin-del': () => { VAULT.pin = VAULT.pin.slice(0, -1); render(); },
+  'v-lock': () => { lockVault(); location.hash = '#profil'; },
+  'v-del': t => { VAULT.del = t.dataset.id; render(); },
+  'v-del-no': () => { VAULT.del = null; render(); },
+  'v-del-yes': async t => { await IDB.del(t.dataset.id); if (VAULT.urls[t.dataset.id]) { URL.revokeObjectURL(VAULT.urls[t.dataset.id]); delete VAULT.urls[t.dataset.id]; } VAULT.del = null; await loadVault(); toast('Bild gelöscht'); render(); },
+  'v-change': () => { lockVault(); VAULT.mode = 'old'; location.hash = '#vault'; render(); },
+  'v-export': () => exportVault(),
   's-save': async () => { const ok = await testAndSave($('#s-url').value, $('#s-key').value, $('#s-err')); if (ok) { toast('Verbunden'); sync({ overlay: true }); } },
-  's-me': t => { cfg.me = t.dataset.v; LS.set('cfg', cfg); builder = null; draft = null; saveDraft(); invalidate(); toast(`Du bist jetzt ${cfg.me}`); render(); },
+  's-me': t => { cfg.me = t.dataset.v; LS.set('cfg', cfg); builder = null; draft = null; saveDraft(); lockVault(); invalidate(); toast(`Du bist jetzt ${cfg.me}`); render(); },
   'reset-ask': () => { resetAsk = true; render(); },
   'reset-no': () => { resetAsk = false; render(); },
   'reset-yes': () => { events = []; pending = []; lastSeq = 0; lastSync = null; seenIds = new Set(); saveLog(); LS.set('lastSync', null); resetAsk = false; invalidate(); builder = null; sync({ overlay: true }); render(); },
@@ -1293,6 +1602,7 @@ const actions = {
   }
 };
 document.addEventListener('click', e => {
+  if (e.target.id === 'vn-file') VAULT.picking = Date.now(); // Kamera/Fotoauswahl: Vault währenddessen nicht sperren
   const t = e.target.closest('[data-act]');
   if (!t || !actions[t.dataset.act]) return;
   if (t.tagName === 'BUTTON' && t.type !== 'submit') e.preventDefault();
@@ -1301,6 +1611,21 @@ document.addEventListener('click', e => {
 document.addEventListener('submit', e => {
   if (e.target.id === 'exform') { e.preventDefault(); submitExercise(e.target); }
   if (e.target.id === 'swapform') { e.preventDefault(); submitSwap(e.target); }
+  if (e.target.id === 'vaultform') { e.preventDefault(); saveVaultEntry(e.target); }
+});
+document.addEventListener('change', e => {
+  const t = e.target;
+  if (t.id === 'f-type') t.dispatchEvent(new Event('input', { bubbles: true }));
+  if ((t.id === 'av-file' || t.id === 'av-file2') && t.files[0]) setAvatar(t.files[0]);
+  if (t.id === 'v-import' && t.files[0]) readBackupFile(t.files[0]);
+  if (t.id === 'vn-file' && t.files[0]) {
+    if (VAULT.photoUrl) URL.revokeObjectURL(VAULT.photoUrl);
+    VAULT.picking = 0; VAULT.photo = t.files[0]; VAULT.photoUrl = URL.createObjectURL(t.files[0]);
+    const box = t.closest('.pickphoto'); let img = box.querySelector('img');
+    box.querySelectorAll('svg, b, span').forEach(n => n.remove());
+    if (!img) { img = document.createElement('img'); img.alt = 'Gewähltes Foto'; box.prepend(img); }
+    img.src = VAULT.photoUrl;
+  }
 });
 let draftTimer;
 document.addEventListener('input', e => {
@@ -1308,15 +1633,15 @@ document.addEventListener('input', e => {
   if (t.dataset.f && draft) {
     const i = +t.dataset.i, j = +t.dataset.j;
     draft.items[i].sets[j][t.dataset.f] = t.value;
-    if (t.dataset.f === 'w') updateWarmups(i);
+    if (t.dataset.f === 'w' && j === 0) { const el = document.getElementById(`wu-${i}`); if (el) el.textContent = warmupLabel(draft.items[i]); }
     clearTimeout(draftTimer); draftTimer = setTimeout(saveDraft, 300);
   } else if (t.dataset.note != null && draft) {
     draft.items[+t.dataset.note].note = t.value;
     clearTimeout(draftTimer); draftTimer = setTimeout(saveDraft, 300);
-  } else if (t.dataset.b === 'title' && builder) {
-    builder.work[builder.day].title = t.value.trimStart();
+  } else if ((t.dataset.b === 'title' || t.dataset.b === 'short') && builder) {
+    builder.work[builder.day][t.dataset.b] = t.dataset.b === 'short' ? t.value.toUpperCase().slice(0, 6) : t.value.trimStart();
     const was = builder.dirty[builder.day]; markDirty();
-    if (was !== builder.dirty[builder.day]) { const pos = t.selectionStart; render(); const n = $('#b-title'); if (n) { n.focus(); n.setSelectionRange(pos, pos); } }
+    if (was !== builder.dirty[builder.day]) { const id = t.id, pos = t.selectionStart; render(); const n = document.getElementById(id); if (n) { n.focus(); n.setSelectionRange(pos, pos); } }
   } else if (t.id === 'f-type') {
     $('#f-step-l').hidden = t.value === 'time';
     $('#f-warm-l').hidden = t.value !== 'kg';
@@ -1327,19 +1652,20 @@ document.addEventListener('input', e => {
     if (k) { const sel = $('#sw-type'); if (sel) sel.value = k.type; }
   }
 });
-document.addEventListener('change', e => { if (e.target.id === 'f-type') e.target.dispatchEvent(new Event('input', { bubbles: true })); });
 window.addEventListener('hashchange', () => { $('#modal').innerHTML = ''; render(); });
 
 /* ---------- Start der App ---------- */
 let hiddenAt = Date.now();
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'hidden') { hiddenAt = Date.now(); if (draft) saveDraft(); return; }
+  if (document.visibilityState === 'hidden') { hiddenAt = Date.now(); if (draft) saveDraft(); if ((VAULT.key || VAULT.photo) && Date.now() - VAULT.picking > 180000) { lockVault(); if (view.startsWith('vault')) location.hash = '#profil'; } return; }
   const away = Date.now() - hiddenAt;
   if (cfg.me && cfg.url && away > 60000) sync({ overlay: away > 5 * 60000 && view !== 'training' });
 });
 window.addEventListener('online', () => { if (cfg.me && cfg.url) sync({ quiet: true }); });
-// Während eines Trainings etwa jede Minute still abgleichen (z. B. für einen Tausch „für uns beide“)
-setInterval(() => { if (view === 'training' && draft && cfg.url && document.visibilityState === 'visible' && !syncing) sync({ quiet: true }); }, 60000);
+setInterval(() => {
+  if (view === 'training' && draft) { const c = $('#tp-count'); if (c) c.textContent = trainCountText(); }
+  if (view === 'training' && draft && cfg.url && document.visibilityState === 'visible' && !syncing && Date.now() - (setInterval.last || 0) > 60000) { setInterval.last = Date.now(); sync({ quiet: true }); }
+}, 15000);
 
 if ('serviceWorker' in navigator && location.protocol === 'https:') {
   const hadController = !!navigator.serviceWorker.controller;
